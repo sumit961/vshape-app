@@ -1,0 +1,538 @@
+{
+  "api": {
+    "name": "HealthConnectPlugin",
+    "slug": "healthconnectplugin",
+    "docs": "",
+    "tags": [],
+    "methods": [
+      {
+        "name": "checkAvailability",
+        "signature": "() => any",
+        "parameters": [],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [
+          "HealthConnectAvailability"
+        ],
+        "slug": "checkavailability"
+      },
+      {
+        "name": "insertRecords",
+        "signature": "(options: { records: Record[]; }) => any",
+        "parameters": [
+          {
+            "name": "options",
+            "docs": "",
+            "type": "{ records: {}; }"
+          }
+        ],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [
+          "Record"
+        ],
+        "slug": "insertrecords"
+      },
+      {
+        "name": "readRecord",
+        "signature": "(options: { type: RecordType; recordId: string; }) => any",
+        "parameters": [
+          {
+            "name": "options",
+            "docs": "",
+            "type": "{ type: RecordType; recordId: string; }"
+          }
+        ],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [
+          "RecordType",
+          "StoredRecord"
+        ],
+        "slug": "readrecord"
+      },
+      {
+        "name": "readRecords",
+        "signature": "(options: { type: RecordType; timeRangeFilter: TimeRangeFilter; dataOriginFilter?: string[]; ascendingOrder?: boolean; pageSize?: number; pageToken?: string; }) => any",
+        "parameters": [
+          {
+            "name": "options",
+            "docs": "",
+            "type": "{ type: RecordType; timeRangeFilter: TimeRangeFilter; dataOriginFilter?: {} | undefined; ascendingOrder?: boolean | undefined; pageSize?: number | undefined; pageToken?: string | undefined; }"
+          }
+        ],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [
+          "RecordType",
+          "TimeRangeFilter",
+          "StoredRecord"
+        ],
+        "slug": "readrecords"
+      },
+      {
+        "name": "getChangesToken",
+        "signature": "(options: { types: RecordType[]; }) => any",
+        "parameters": [
+          {
+            "name": "options",
+            "docs": "",
+            "type": "{ types: {}; }"
+          }
+        ],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [
+          "RecordType"
+        ],
+        "slug": "getchangestoken"
+      },
+      {
+        "name": "getChanges",
+        "signature": "(options: { token: string; }) => any",
+        "parameters": [
+          {
+            "name": "options",
+            "docs": "",
+            "type": "{ token: string; }"
+          }
+        ],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [
+          "Change"
+        ],
+        "slug": "getchanges"
+      },
+      {
+        "name": "requestHealthPermissions",
+        "signature": "(options: { read: RecordType[]; write: RecordType[]; }) => any",
+        "parameters": [
+          {
+            "name": "options",
+            "docs": "",
+            "type": "{ read: {}; write: {}; }"
+          }
+        ],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [
+          "RecordType"
+        ],
+        "slug": "requesthealthpermissions"
+      },
+      {
+        "name": "checkHealthPermissions",
+        "signature": "(options: { read: RecordType[]; write: RecordType[]; }) => any",
+        "parameters": [
+          {
+            "name": "options",
+            "docs": "",
+            "type": "{ read: {}; write: {}; }"
+          }
+        ],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [
+          "RecordType"
+        ],
+        "slug": "checkhealthpermissions"
+      },
+      {
+        "name": "revokeHealthPermissions",
+        "signature": "() => any",
+        "parameters": [],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [],
+        "slug": "revokehealthpermissions"
+      },
+      {
+        "name": "openHealthConnectSetting",
+        "signature": "() => any",
+        "parameters": [],
+        "returns": "any",
+        "tags": [],
+        "docs": "",
+        "complexTypes": [],
+        "slug": "openhealthconnectsetting"
+      }
+    ],
+    "properties": []
+  },
+  "interfaces": [],
+  "enums": [],
+  "typeAliases": [
+    {
+      "name": "HealthConnectAvailability",
+      "slug": "healthconnectavailability",
+      "docs": "",
+      "types": [
+        {
+          "text": "'Available'",
+          "complexTypes": []
+        },
+        {
+          "text": "'NotInstalled'",
+          "complexTypes": []
+        },
+        {
+          "text": "'NotSupported'",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "Record",
+      "slug": "record",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n      type: 'ActiveCaloriesBurned';\n      startTime: Date;\n      startZoneOffset?: string;\n      endTime: Date;\n      endZoneOffset?: string;\n      energy: Energy;\n    }",
+          "complexTypes": [
+            "Date",
+            "Energy"
+          ]
+        },
+        {
+          "text": "{\n      type: 'BasalBodyTemperature';\n      time: Date;\n      zoneOffset?: string;\n      temperature: Temperature;\n      measurementLocation:\n        | 'unknown'\n        | 'armpit'\n        | 'finger'\n        | 'forehead'\n        | 'mouth'\n        | 'rectum'\n        | 'temporal_artery'\n        | 'toe'\n        | 'ear'\n        | 'wrist'\n        | 'vagina';\n    }",
+          "complexTypes": [
+            "Date",
+            "Temperature"
+          ]
+        },
+        {
+          "text": "{\n      type: 'BasalMetabolicRate';\n      time: Date;\n      zoneOffset?: string;\n      basalMetabolicRate: Power;\n    }",
+          "complexTypes": [
+            "Date",
+            "Power"
+          ]
+        },
+        {
+          "text": "{\n      type: 'BloodGlucose';\n      time: Date;\n      zoneOffset?: string;\n      level: BloodGlucose;\n      specimenSource:\n        | 'unknown'\n        | 'interstitial_fluid'\n        | 'capillary_blood'\n        | 'plasma'\n        | 'serum'\n        | 'tears'\n        | 'whole_blood';\n      mealType: 'unknown' | 'breakfast' | 'lunch' | 'dinner' | 'snack';\n      relationToMeal: 'unknown' | 'general' | 'fasting' | 'before_meal' | 'after_meal';\n    }",
+          "complexTypes": [
+            "Date",
+            "BloodGlucose"
+          ]
+        },
+        {
+          "text": "{\n      type: 'BloodPressure';\n      time: Date;\n      zoneOffset?: string;\n      systolic: Pressure;\n      diastolic: Pressure;\n      bodyPosition: 'unknown' | 'standing_up' | 'sitting_down' | 'lying_down' | 'reclining';\n      measurementLocation: 'unknown' | 'left_wrist' | 'right_wrist' | 'left_upper_arm' | 'right_upper_arm';\n    }",
+          "complexTypes": [
+            "Date",
+            "Pressure"
+          ]
+        },
+        {
+          "text": "{\n      type: 'BodyFat';\n      time: Date;\n      zoneOffset?: string;\n      percentage: Percentage;\n    }",
+          "complexTypes": [
+            "Date",
+            "Percentage"
+          ]
+        },
+        {
+          "text": "{\n      type: 'BodyTemperature';\n      time: Date;\n      zoneOffset?: string;\n      temperature: Temperature;\n      measurementLocation: 'unknown' | 'armpit' | 'finger' | 'forehead' | 'mouth' | 'rectum' | 'temporal_artery' | 'toe' | 'ear' | 'wrist' | 'vagina';\n    }",
+          "complexTypes": [
+            "Date",
+            "Temperature"
+          ]
+        },
+        {
+          "text": "{\n      type: 'HeartRateSeries';\n      startTime: Date;\n      startZoneOffset?: string;\n      endTime: Date;\n      endZoneOffset?: string;\n      samples: HeartRateSample[];\n    }",
+          "complexTypes": [
+            "Date",
+            "HeartRateSample"
+          ]
+        },
+        {
+          "text": "{\n      type: 'Height';\n      time: Date;\n      zoneOffset?: string;\n      height: Length;\n    }",
+          "complexTypes": [
+            "Date",
+            "Length"
+          ]
+        },
+        {
+          "text": "{\n      type: 'OxygenSaturation';\n      time: Date;\n      zoneOffset?: string;\n      percentage: Percentage;\n    }",
+          "complexTypes": [
+            "Date",
+            "Percentage"
+          ]
+        },
+        {
+          "text": "{\n      type: 'RespiratoryRate';\n      time: Date;\n      zoneOffset?: string;\n      rate: number;\n    }",
+          "complexTypes": [
+            "Date"
+          ]
+        },
+        {
+          "text": "{\n      type: 'RestingHeartRate';\n      time: Date;\n      zoneOffset?: string;\n      beatsPerMinute: number;\n    }",
+          "complexTypes": [
+            "Date"
+          ]
+        },
+        {
+          "text": "{\n      type: 'Steps';\n      startTime: Date;\n      startZoneOffset?: string;\n      endTime: Date;\n      endZoneOffset?: string;\n      count: number;\n    }",
+          "complexTypes": [
+            "Date"
+          ]
+        },
+        {
+          "text": "{\n      type: 'Weight';\n      time: Date;\n      zoneOffset?: string;\n      weight: Mass;\n    }",
+          "complexTypes": [
+            "Date",
+            "Mass"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Energy",
+      "slug": "energy",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  unit: 'calories' | 'kilocalories' | 'joules' | 'kilojoules';\n  value: number;\n}",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "Temperature",
+      "slug": "temperature",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  unit: 'celsius' | 'fahrenheit';\n  value: number;\n}",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "Power",
+      "slug": "power",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  unit: 'kilocaloriesPerDay' | 'watts';\n  value: number;\n}",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "BloodGlucose",
+      "slug": "bloodglucose",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  unit: 'milligramsPerDeciliter' | 'millimolesPerLiter';\n  value: number;\n}",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "Pressure",
+      "slug": "pressure",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  unit: 'millimetersOfMercury';\n  value: number;\n}",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "Percentage",
+      "slug": "percentage",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  value: number;\n}",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "HeartRateSample",
+      "slug": "heartratesample",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  time: Date;\n  beatsPerMinute: number;\n}",
+          "complexTypes": [
+            "Date"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Length",
+      "slug": "length",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  unit: 'meter' | 'kilometer' | 'mile' | 'inch' | 'feet';\n  value: number;\n}",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "Mass",
+      "slug": "mass",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  unit: 'gram' | 'kilogram' | 'milligram' | 'microgram' | 'ounce' | 'pound';\n  value: number;\n}",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "RecordType",
+      "slug": "recordtype",
+      "docs": "",
+      "types": [
+        {
+          "text": "'ActiveCaloriesBurned'",
+          "complexTypes": []
+        },
+        {
+          "text": "'BasalBodyTemperature'",
+          "complexTypes": []
+        },
+        {
+          "text": "'BasalMetabolicRate'",
+          "complexTypes": []
+        },
+        {
+          "text": "'BloodGlucose'",
+          "complexTypes": []
+        },
+        {
+          "text": "'BloodPressure'",
+          "complexTypes": []
+        },
+        {
+          "text": "'BodyFat'",
+          "complexTypes": []
+        },
+        {
+          "text": "'BodyTemperature'",
+          "complexTypes": []
+        },
+        {
+          "text": "'HeartRateSeries'",
+          "complexTypes": []
+        },
+        {
+          "text": "'Height'",
+          "complexTypes": []
+        },
+        {
+          "text": "'OxygenSaturation'",
+          "complexTypes": []
+        },
+        {
+          "text": "'RespiratoryRate'",
+          "complexTypes": []
+        },
+        {
+          "text": "'RestingHeartRate'",
+          "complexTypes": []
+        },
+        {
+          "text": "'Steps'",
+          "complexTypes": []
+        },
+        {
+          "text": "'Weight'",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "StoredRecord",
+      "slug": "storedrecord",
+      "docs": "",
+      "types": [
+        {
+          "text": "RecordBase & Record",
+          "complexTypes": [
+            "RecordBase",
+            "Record"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "RecordBase",
+      "slug": "recordbase",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  metadata: RecordMetadata;\n}",
+          "complexTypes": [
+            "RecordMetadata"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "RecordMetadata",
+      "slug": "recordmetadata",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n  id: string;\n  clientRecordId?: string;\n  clientRecordVersion: number;\n  lastModifiedTime: Date;\n  dataOrigin: string;\n}",
+          "complexTypes": [
+            "Date"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "TimeRangeFilter",
+      "slug": "timerangefilter",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n      type: 'before' | 'after';\n      time: Date;\n    }",
+          "complexTypes": [
+            "Date"
+          ]
+        },
+        {
+          "text": "{\n      type: 'between';\n      startTime: Date;\n      endTime: Date;\n    }",
+          "complexTypes": [
+            "Date"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Change",
+      "slug": "change",
+      "docs": "",
+      "types": [
+        {
+          "text": "{\n      type: 'Upsert';\n      record: Record;\n    }",
+          "complexTypes": [
+            "Record"
+          ]
+        },
+        {
+          "text": "{\n      type: 'Delete';\n      recordId: string;\n    }",
+          "complexTypes": []
+        }
+      ]
+    }
+  ],
+  "pluginConfigs": []
+}

@@ -1,0 +1,17 @@
+{
+  "name": "V-Shape Tracker",
+  "short_name": "V-Shape",
+  "description": "Track food, steps and gym sets with weight and rep suggestions.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FFF4EA",
+  "theme_color": "#FF6B1A",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

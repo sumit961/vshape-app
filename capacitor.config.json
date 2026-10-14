@@ -1,0 +1,6 @@
+{
+  "appId": "app.vshape.tracker",
+  "appName": "V-Shape",
+  "webDir": "www",
+  "android": { "allowMixedContent": false }
+}
