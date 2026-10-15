@@ -63,7 +63,7 @@
 
   /* ---------- sessions ---------- */
   function newSession(day, now, label) {
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     return {
       id: genId(now), day: day || null, label: label || null,
       startedAt: now, finishedAt: null, status: 'active',
@@ -82,30 +82,53 @@
   function findSessionById(day, id) {
     return ((day && day.sessions) || []).filter(function (s) { return s.id === id; })[0] || null;
   }
+  function findSessionsForDay(day, dayKey) {
+    return ((day && day.sessions) || []).filter(function (s) { return s.day === dayKey; });
+  }
+  function findOpenSessionForDay(day, dayKey) {
+    var list = findSessionsForDay(day, dayKey);
+    for (var i = list.length - 1; i >= 0; i--) {
+      if (list[i].status === 'active' || list[i].status === 'paused') return list[i];
+    }
+    return null;
+  }
+  function findLastSessionForDay(day, dayKey) {
+    var list = findSessionsForDay(day, dayKey);
+    return list.length ? list[list.length - 1] : null;
+  }
+  // Decides what starting/continuing a workout should do, without ever reusing
+  // or mutating a *finished* session: a finished session for today's Push day
+  // must not silently become the target of a second Push workout later today.
+  function decideSessionStart(day, dayKey, globalOpenSession) {
+    var existing = findOpenSessionForDay(day, dayKey);
+    if (existing) return { action: 'reuse', session: existing };
+    if (globalOpenSession) return { action: 'blocked', blockingSession: globalOpenSession };
+    return { action: 'create' };
+  }
 
   function sessionElapsedMs(session, now) {
     if (!session) return 0;
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     var end = session.status === 'paused' ? session.pausedAt
       : session.status === 'finished' ? session.finishedAt : now;
     if (!isFiniteNumber(end) || !isFiniteNumber(session.startedAt)) return 0;
     return Math.max(0, (end - session.startedAt) - (session.pausedMs || 0));
   }
   function pauseSession(session, now) {
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     if (!session || session.status !== 'active') return session;
     session.status = 'paused'; session.pausedAt = now;
     return session;
   }
   function resumeSession(session, now) {
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     if (!session || session.status !== 'paused') return session;
     session.pausedMs = (session.pausedMs || 0) + (now - session.pausedAt);
     session.pausedAt = null; session.status = 'active';
     return session;
   }
   function finishSession(session, now) {
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     if (!session || session.status === 'finished') return session;
     if (session.status === 'paused') {
       session.pausedMs = (session.pausedMs || 0) + (now - session.pausedAt);
@@ -141,34 +164,34 @@
 
   /* ---------- rest timer (durable deadline, stored on the session) ---------- */
   function startRest(session, ex, now) {
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     if (!session) return null;
     var ms = (ex.rest || 0) * 1000;
     session.rest = { exId: ex.id, label: ex.name, startedAt: now, durationMs: ms, deadline: now + ms, paused: false, pausedRemainingMs: null, done: false };
     return session.rest;
   }
   function pauseRest(session, now) {
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     var r = session && session.rest; if (!r || r.paused) return r;
     r.pausedRemainingMs = Math.max(0, r.deadline - now); r.paused = true;
     return r;
   }
   function resumeRest(session, now) {
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     var r = session && session.rest; if (!r || !r.paused) return r;
     r.deadline = now + (r.pausedRemainingMs || 0); r.paused = false; r.pausedRemainingMs = null;
     return r;
   }
   function skipRest(session) { if (session) session.rest = null; }
   function restRemainingMs(session, now) {
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     var r = session && session.rest; if (!r) return null;
     return r.paused ? r.pausedRemainingMs : Math.max(0, r.deadline - now);
   }
 
   /* ---------- action-queue reconciliation (native notification -> app state) ---------- */
   function reconcileActions(session, actions, now) {
-    now = now || Date.now();
+    now = isFiniteNumber(now) ? now : Date.now();
     var applied = [], skipped = [];
     var sorted = (actions || []).slice().sort(function (a, b) { return a.seq - b.seq; });
     sorted.forEach(function (a) {
@@ -380,6 +403,8 @@
     sanitizeStepCount: sanitizeStepCount, sanitizeMacroEntry: sanitizeMacroEntry,
     isValidPhotoDataUri: isValidPhotoDataUri,
     newSession: newSession, findOpenSession: findOpenSession, findSessionById: findSessionById,
+    findSessionsForDay: findSessionsForDay, findOpenSessionForDay: findOpenSessionForDay,
+    findLastSessionForDay: findLastSessionForDay, decideSessionStart: decideSessionStart,
     sessionElapsedMs: sessionElapsedMs, pauseSession: pauseSession, resumeSession: resumeSession, finishSession: finishSession,
     logSetIntoSession: logSetIntoSession, undoSetInSession: undoSetInSession, sessionSetsDone: sessionSetsDone,
     startRest: startRest, pauseRest: pauseRest, resumeRest: resumeRest, skipRest: skipRest, restRemainingMs: restRemainingMs,

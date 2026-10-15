@@ -34,15 +34,28 @@ public class WorkoutNotificationPlugin extends Plugin {
         Intent i = new Intent(getContext(), WorkoutForegroundService.class);
         i.setAction(WorkoutForegroundService.ACTION_SHOW);
         i.putExtra(WorkoutForegroundService.EXTRA_STATE, call.getData().toString());
-        getContext().startForegroundService(i);
-        call.resolve();
+        try {
+            getContext().startForegroundService(i);
+            call.resolve();
+        } catch (Exception e) {
+            // e.g. a background-start restriction, or the service rejecting the
+            // startForeground() call itself (see WorkoutForegroundService). The
+            // workout still tracks fine in-app without the notification.
+            JSObject ret = new JSObject();
+            ret.put("error", "could not show the notification (" + e.getClass().getSimpleName() + ")");
+            call.resolve(ret);
+        }
     }
 
     @PluginMethod
     public void hide(PluginCall call) {
         Intent i = new Intent(getContext(), WorkoutForegroundService.class);
         i.setAction(WorkoutForegroundService.ACTION_HIDE);
-        getContext().startService(i);
+        try {
+            getContext().startService(i);
+        } catch (Exception ignored) {
+            // Nothing to clean up on our side if the service was never running.
+        }
         call.resolve();
     }
 
@@ -91,6 +104,8 @@ public class WorkoutNotificationPlugin extends Plugin {
         } catch (JSONException e) {
             ret.put("actions", new JSArray());
         }
+        String error = ActionQueue.readAndClearError(getContext());
+        if (error != null) ret.put("error", error);
         call.resolve(ret);
     }
 

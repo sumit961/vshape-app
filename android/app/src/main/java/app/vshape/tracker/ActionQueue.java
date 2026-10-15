@@ -15,6 +15,8 @@ final class ActionQueue {
     private static final String PREFS = "vshape_workout_actions";
     private static final String KEY_QUEUE = "queue";
     private static final String KEY_SEQ = "seq";
+    private static final String KEY_LAST_STATE = "lastState";
+    private static final String KEY_ERROR = "error";
 
     private ActionQueue() {}
 
@@ -58,5 +60,29 @@ final class ActionQueue {
         } catch (Exception e) {
             p.edit().putString(KEY_QUEUE, "[]").apply();
         }
+    }
+
+    /** Last state JSON passed to show(), so a notification action can be redrawn
+        with a "pending" marker instantly, without needing the WebView awake. */
+    static void saveLastState(Context ctx, String stateJson) {
+        prefs(ctx).edit().putString(KEY_LAST_STATE, stateJson).apply();
+    }
+
+    static String loadLastState(Context ctx) {
+        return prefs(ctx).getString(KEY_LAST_STATE, null);
+    }
+
+    /** Records a foreground-service/notification failure for the JS side to
+        surface once. Read-once: readAndClearError() returns it then clears it,
+        so the same failure is never reported twice. */
+    static void recordError(Context ctx, String message) {
+        prefs(ctx).edit().putString(KEY_ERROR, message).apply();
+    }
+
+    static synchronized String readAndClearError(Context ctx) {
+        SharedPreferences p = prefs(ctx);
+        String msg = p.getString(KEY_ERROR, null);
+        if (msg != null) p.edit().remove(KEY_ERROR).apply();
+        return msg;
     }
 }

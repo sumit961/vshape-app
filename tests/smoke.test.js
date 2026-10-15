@@ -59,6 +59,41 @@ test('smoke: a legacy (schema-less) backup is migrated to schema 2 sessions on b
   assert.equal(safetyRaw.days['2026-01-01'].w.log['incline-db'][0].w, 20);
 });
 
+test('smoke: a storage failure while reconciling a native action leaves the queue unacknowledged for retry', async () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  const activeSession = { id: 'sess1', day: 'push', label: null, startedAt: 1000, finishedAt: null, status: 'active', pausedAt: null, pausedMs: 0, lastAppliedSeq: 0, log: {}, rest: null };
+  const seeded = {
+    schema: 2,
+    profile: { targets: { kcal: 2350, protein: 160, steps: 20000, water: 3000 }, weights: {}, customFoods: [] },
+    days: { '2026-01-01': { date: '2026-01-01', food: [], steps: 0, stepsSource: null, water: 0, sessions: [activeSession], quarantine: { sets: [], food: [] } } },
+    active: { date: '2026-01-01', id: 'sess1' },
+  };
+  sandbox.localStorage.setItem('vshape-tracker-v1', JSON.stringify(seeded));
+
+  let cleared = false;
+  const plugin = {
+    getPendingActions() { return Promise.resolve({ actions: [{ seq: 1, type: 'pause', sessionId: 'sess1', ts: 5000 }] }); },
+    clearPendingActions() { cleared = true; return Promise.resolve(); },
+    show() { return Promise.resolve({}); },
+    hide() { return Promise.resolve({}); },
+  };
+  sandbox.Capacitor = { isNativePlatform: () => true, Plugins: { WorkoutNotification: plugin } };
+
+  const realSetItem = sandbox.localStorage.setItem.bind(sandbox.localStorage);
+  let writesShouldFail = false;
+  sandbox.localStorage.setItem = function (k, v) {
+    if (writesShouldFail) throw new Error('QuotaExceededError');
+    return realSetItem(k, v);
+  };
+
+  assert.doesNotThrow(() => boot(sandbox));
+  writesShouldFail = true; // simulate full storage only after boot's own (unrelated) writes settle
+
+  await new Promise((resolve) => setTimeout(resolve, 900)); // let the real startup setTimeout(…,800) fire reconcileNativeActions()
+
+  assert.equal(cleared, false, 'the native action queue must not be acknowledged when the resulting save failed - it must stay queued for retry');
+});
+
 test('smoke: data from a newer schema is locked, not flattened or discarded', () => {
   const sandbox = createSandbox(KNOWN_IDS);
   sandbox.localStorage.setItem('vshape-tracker-v1', JSON.stringify({ schema: 99, profile: {}, days: { x: { sessions: [] } } }));

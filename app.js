@@ -114,7 +114,7 @@ var TPL=[
 var LS='vshape-tracker-v1';
 function defProfile(){return {targets:{kcal:2350,protein:160,steps:20000,water:3000},weights:{},customFoods:[],baseline:null,notifPermission:null}}
 var S={profile:defProfile(),days:{},photos:{},active:null,locked:false,lockReason:null,lockedSchemaFound:null};
-var ui={tab:'today',date:todayISO(),today:todayISO(),wd:null,sheet:null,drafts:{},timer:null,exSel:'incline-db',dirty:false,storageOk:true,storageMsg:null,hcDenied:false};
+var ui={tab:'today',date:todayISO(),today:todayISO(),wd:null,sheet:null,drafts:{},timer:null,exSel:'incline-db',dirty:false,storageOk:true,storageMsg:null,hcDenied:false,lastNotifError:null};
 var installEvt=null;
 
 function saveLocal(){
@@ -168,11 +168,16 @@ function saveDay(d){queueSave('day-'+d)}
 function saveProfile(){queueSave('profile')}
 
 /* ---------- sessions (bridges S/ui onto VShapeCore's pure session model) ---------- */
-function sessionFor(date,dayKey){
+/* openSessionFor/lastSessionFor never return the same thing once a session is
+   finished: a finished session must not be silently reused or edited by a
+   later workout of the same program day. */
+function openSessionFor(date,dayKey){
   var day=S.days[date];
-  if(!day||!day.sessions)return null;
-  var list=day.sessions.filter(function(s){return s.day===dayKey});
-  return list.length?list[list.length-1]:null;
+  return day?VShapeCore.findOpenSessionForDay(day,dayKey):null;
+}
+function lastSessionFor(date,dayKey){
+  var day=S.days[date];
+  return day?VShapeCore.findLastSessionForDay(day,dayKey):null;
 }
 function getOpenSessionAnywhere(){
   if(!S.active)return null;
@@ -181,11 +186,11 @@ function getOpenSessionAnywhere(){
   return (s&&(s.status==='active'||s.status==='paused'))?s:null;
 }
 function startOrGetSession(date,dayKey){
-  var existing=sessionFor(date,dayKey);
-  if(existing)return {session:existing,created:false};
-  var open=getOpenSessionAnywhere();
-  if(open)return {blocked:true,blockingSession:open};
-  var day=ensureDay(date),s=VShapeCore.newSession(dayKey,Date.now());
+  var day=ensureDay(date);
+  var decision=VShapeCore.decideSessionStart(day,dayKey,getOpenSessionAnywhere());
+  if(decision.action==='reuse')return {session:decision.session,created:false};
+  if(decision.action==='blocked')return {blocked:true,blockingSession:decision.blockingSession};
+  var s=VShapeCore.newSession(dayKey,Date.now());
   day.sessions.push(s);
   S.active={date:date,id:s.id};
   return {session:s,created:true};
@@ -397,7 +402,7 @@ function header(){
 }
 function setsDone(key,date){
   var P=PROGRAM[key];if(!P)return {done:0,total:0,vol:0};
-  return VShapeCore.sessionSetsDone(sessionFor(date,key),P);
+  return VShapeCore.sessionSetsDone(openSessionFor(date,key),P);
 }
 function gymDone(d){
   var x=S.days[d];
@@ -476,10 +481,16 @@ function viewFood(){
 }
 function e1rm(ex,s){return VShapeCore.e1rm(ex,s)}
 function isPR(ex,date,logged){return VShapeCore.isPR(ex,history(ex.id,date),logged)}
-function lifecycleBar(session,P){
-  if(!session)return '<div class="card lc"><button class="btn full" data-act="startworkout">Start workout</button></div>';
+function lifecycleBar(openSession,lastSession,P){
+  if(!openSession){
+    if(lastSession&&lastSession.status==='finished'){
+      var doneTxt=fmtClock(VShapeCore.sessionElapsedMs(lastSession,Date.now()));
+      return '<div class="card lc"><div class="row"><div class="grow muted small">Finished '+esc(P?P.name:'workout')+' &middot; '+doneTxt+' elapsed.</div><button class="btn ghost sm" data-act="startworkout">Start another</button></div></div>';
+    }
+    return '<div class="card lc"><button class="btn full" data-act="startworkout">Start workout</button></div>';
+  }
+  var session=openSession;
   var elapsed=VShapeCore.sessionElapsedMs(session,Date.now()),timeTxt=fmtClock(elapsed);
-  if(session.status==='finished')return '<div class="card lc"><div class="row"><div class="grow muted small">Finished '+esc(P?P.name:'workout')+' &middot; '+timeTxt+' elapsed.</div><button class="btn ghost sm" data-act="startworkout">Start another</button></div></div>';
   var isPaused=session.status==='paused';
   return '<div class="card lc'+(isPaused?' paused':'')+'"><div class="row"><div class="grow"><b>'+(isPaused?'Workout paused':'Workout active')+'</b><div class="muted small">'+timeTxt+' elapsed</div></div>'+
     '<button class="btn sm" data-act="'+(isPaused?'resumeworkout':'pauseworkout')+'">'+(isPaused?'Resume':'Pause')+'</button>'+
@@ -488,8 +499,8 @@ function lifecycleBar(session,P){
 function viewTrain(){
   var key=curWd(),pills='<div class="pills" role="group" aria-label="Workout day">'+DAY_ORDER.map(function(k){return '<button class="pill" data-act="wd" data-k="'+k+'" aria-pressed="'+(k===key)+'">'+esc(PROGRAM[k].name)+'</button>'}).join('')+'</div>';
   if(key==='rest')return pills+'<div class="card"><h3>Rest day</h3><p style="margin:0">Thursday and Sunday are for recovery. Normal work and walking are enough. Pick a session above if you want to train anyway.</p></div>';
-  var P=PROGRAM[key],sd=setsDone(key,ui.date),session=sessionFor(ui.date,key),log=(session&&session.log)||{};
-  var out=pills+lifecycleBar(session,P)+'<div class="card"><div class="row"><div class="grow"><div class="num" style="font-size:30px;font-weight:700;line-height:1.1">'+esc(P.name)+'</div><div class="muted small">'+esc(P.tag)+'</div></div><div style="text-align:right"><div class="num" style="font-size:24px;font-weight:700">'+sd.done+'/'+sd.total+'</div><div class="muted small">'+(sd.vol?num(sd.vol)+' kg volume':'sets done')+'</div></div></div><div class="cue">'+esc(P.cue)+'</div></div>';
+  var P=PROGRAM[key],sd=setsDone(key,ui.date),session=openSessionFor(ui.date,key),log=(session&&session.log)||{};
+  var out=pills+lifecycleBar(session,lastSessionFor(ui.date,key),P)+'<div class="card"><div class="row">'+'<div class="grow"><div class="num" style="font-size:30px;font-weight:700;line-height:1.1">'+esc(P.name)+'</div><div class="muted small">'+esc(P.tag)+'</div></div><div style="text-align:right"><div class="num" style="font-size:24px;font-weight:700">'+sd.done+'/'+sd.total+'</div><div class="muted small">'+(sd.vol?num(sd.vol)+' kg volume':'sets done')+'</div></div></div><div class="cue">'+esc(P.cue)+'</div></div>';
   P.ex.forEach(function(ex){
     var sg=suggest(ex,ui.date),rows='',logged=log[ex.id]||[];
     for(var i=0;i<ex.sets;i++){
@@ -612,7 +623,7 @@ function shrink(file,cb){
 function pushNotificationState(){
   var plugin=wnPlugin();if(!plugin||!isNative())return;
   var s=getOpenSessionAnywhere();
-  if(!VShapeCore.shouldShowNotification(s)){if(plugin.hide)Promise.resolve(plugin.hide()).catch(function(){});return}
+  if(!VShapeCore.shouldShowNotification(s)){if(plugin.hide)Promise.resolve(plugin.hide()).catch(function(err){console&&console.warn&&console.warn('WorkoutNotification.hide failed',err)});return}
   var P=PROGRAM[s.day],sd=VShapeCore.sessionSetsDone(s,P);
   var payload={
     sessionId:s.id,title:P?P.name:'Workout',status:s.status,
@@ -624,18 +635,36 @@ function pushNotificationState(){
     restDeadlineEpochMs:(s.rest&&!s.rest.paused)?s.rest.deadline:null,
     restRemainingMs:s.rest?VShapeCore.restRemainingMs(s,Date.now()):null
   };
-  if(plugin.show)Promise.resolve(plugin.show(payload)).catch(function(){});
+  if(plugin.show)Promise.resolve(plugin.show(payload)).then(function(res){if(res&&res.error)reportNotifError(res.error)}).catch(function(){reportNotifError('could not update the notification')});
 }
 function reconcileNativeActions(){
   var plugin=wnPlugin();if(!plugin||!isNative())return Promise.resolve();
   return Promise.resolve(plugin.getPendingActions()).then(function(res){
+    if(res&&res.error)reportNotifError(res.error);
     var actions=(res&&res.actions)||[];
     if(!actions.length)return;
     var session=getOpenSessionAnywhere();
     var r=VShapeCore.reconcileActions(session,actions,Date.now());
-    if(r.applied.length&&S.active){saveDay(S.active.date);render()}
-    if(plugin.clearPendingActions)return Promise.resolve(plugin.clearPendingActions({upTo:session?session.lastAppliedSeq:0})).catch(function(){});
+    /* reconcileActions puts every action from this batch into either applied or
+       skipped - never drops one silently - so acknowledging (clearing) the
+       whole batch by its highest seq is always safe PROVIDED the resulting
+       state actually made it to durable storage. A skip-only batch changed
+       nothing, so it's always safe to clear. A batch with an applied action
+       is only cleared once its save actually succeeds - if saveDay() fails
+       (full storage, etc.), the queue is left untouched so the exact same
+       actions are retried next time, instead of being discarded with their
+       effect never durably saved. */
+    var maxSeq=actions.reduce(function(m,a){return Math.max(m,a.seq||0)},0);
+    var savedOk=true;
+    if(r.applied.length&&S.active){saveDay(S.active.date);savedOk=(ui.storageOk!==false);render();drawTimer()}
+    if(!savedOk)return; /* leave the native queue alone; retry next reconciliation */
+    if(plugin.clearPendingActions)return Promise.resolve(plugin.clearPendingActions({upTo:maxSeq})).catch(function(){});
   }).catch(function(){});
+}
+function reportNotifError(msg){
+  if(ui.lastNotifError===msg)return;
+  ui.lastNotifError=msg;
+  toast('Workout notification: '+msg);
 }
 
 /* ---------- render ---------- */
@@ -743,7 +772,9 @@ function tickFn(){
   if(left<=0&&!rest.done){
     rest.done=true;$('#timer').className='go';
     try{navigator.vibrate&&navigator.vibrate(200)}catch(e){}
-    setTimeout(function(){var s2=getOpenSessionAnywhere();if(s2&&s2.rest&&s2.rest.done){VShapeCore.skipRest(s2);if(S.active)saveDay(S.active.date);drawTimer()}},7000);
+    if(S.active)saveDay(S.active.date);
+    pushNotificationState(); /* so the notification stops showing a stuck 0:00 countdown right away */
+    setTimeout(function(){var s2=getOpenSessionAnywhere();if(s2&&s2.rest&&s2.rest.done){VShapeCore.skipRest(s2);if(S.active)saveDay(S.active.date);drawTimer();pushNotificationState()}},7000);
   }
   if(v)v.textContent=rest.done?'Go':fmtClock(left);
 }
@@ -848,7 +879,7 @@ var A={
   pauserest:function(){
     var s=getOpenSessionAnywhere();if(!s||!s.rest)return;
     if(s.rest.paused)VShapeCore.resumeRest(s,Date.now());else VShapeCore.pauseRest(s,Date.now());
-    if(S.active)saveDay(S.active.date);drawTimer();
+    if(S.active)saveDay(S.active.date);drawTimer();pushNotificationState();
   },
   logset:function(t){
     var row=t.closest('.set'),exId=row.dataset.ex,i=Number(row.dataset.i),ex=EXLIST[exId];
@@ -873,7 +904,7 @@ var A={
   tstop:function(){
     var s=getOpenSessionAnywhere();if(s)VShapeCore.skipRest(s);
     if(S.active)saveDay(S.active.date);
-    drawTimer();
+    drawTimer();pushNotificationState();
   },
   exportdata:function(){
     var out={app:'vshape-tracker',v:2,schema:VShapeCore.SCHEMA_VERSION,exportedAt:new Date().toISOString(),profile:S.profile,days:S.days,photos:S.photos};

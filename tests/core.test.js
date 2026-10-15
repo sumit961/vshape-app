@@ -85,6 +85,38 @@ test('findOpenSession finds the active or paused session, ignoring finished ones
   assert.equal(open.day, 'pull');
 });
 
+/* ---------- same-day repeated sessions / finished-session immutability ---------- */
+test('findOpenSessionForDay ignores a finished session for that same program day', () => {
+  const day = { sessions: [C.newSession('push', 0)] };
+  C.finishSession(day.sessions[0], 1000);
+  assert.equal(C.findOpenSessionForDay(day, 'push'), null);
+  assert.equal(C.findLastSessionForDay(day, 'push'), day.sessions[0]);
+});
+test('decideSessionStart creates a brand-new session instead of reusing a finished one for the same program day', () => {
+  const day = { sessions: [C.newSession('push', 0)] };
+  C.finishSession(day.sessions[0], 1000);
+  const decision = C.decideSessionStart(day, 'push', null);
+  assert.equal(decision.action, 'create');
+});
+test('decideSessionStart reuses an existing open session for the same program day instead of creating a duplicate', () => {
+  const day = { sessions: [C.newSession('push', 0)] };
+  const decision = C.decideSessionStart(day, 'push', day.sessions[0]);
+  assert.equal(decision.action, 'reuse');
+  assert.equal(decision.session, day.sessions[0]);
+});
+test('decideSessionStart blocks starting a second concurrent workout while another one is globally open', () => {
+  const day = { sessions: [] };
+  const otherOpenSession = C.newSession('pull', 0);
+  const decision = C.decideSessionStart(day, 'push', otherOpenSession);
+  assert.equal(decision.action, 'blocked');
+  assert.equal(decision.blockingSession, otherOpenSession);
+});
+test('decideSessionStart allows a fresh start when no sessions exist yet for that day at all', () => {
+  const day = { sessions: [] };
+  const decision = C.decideSessionStart(day, 'push', null);
+  assert.equal(decision.action, 'create');
+});
+
 /* ---------- logging / undo, shared-exercise isolation across sessions ---------- */
 test('logSetIntoSession validates before writing', () => {
   const s = C.newSession('push', 0);
@@ -137,6 +169,11 @@ test('skipRest clears the rest state entirely', () => {
   assert.equal(s.rest, null);
   assert.equal(C.restRemainingMs(s, 1000), null);
 });
+test('restRemainingMs never goes negative once the deadline has passed (no lingering stale countdown)', () => {
+  const s = C.newSession('push', 0);
+  C.startRest(s, { id: 'a', name: 'A', rest: 30 }, 0);
+  assert.equal(C.restRemainingMs(s, 999999), 0);
+});
 test('finishing a session clears any in-progress rest', () => {
   const s = C.newSession('push', 0);
   C.startRest(s, { id: 'a', name: 'A', rest: 60 }, 0);
@@ -175,6 +212,16 @@ test('reconcileActions skips actions for the wrong session and unknown types', (
   assert.equal(r.applied.length, 0);
   assert.deepEqual(r.skipped.map(x => x.reason), ['session-mismatch', 'unknown-type']);
 });
+test('reconcileActions treats two concurrent taps of the same action as idempotent, not a double-apply', () => {
+  const s = C.newSession('push', 0);
+  const r = C.reconcileActions(s, [
+    { seq: 1, type: 'pause', ts: 100 },
+    { seq: 2, type: 'pause', ts: 200 },
+  ], 300);
+  assert.equal(r.applied.length, 2); // both are legitimately newer than lastAppliedSeq when fetched together
+  assert.equal(s.status, 'paused');
+  assert.equal(s.pausedAt, 100); // the second pause is a no-op once already paused; it doesn't reset the clock
+});
 test('reconcileActions skips every action once the session is finished', () => {
   const s = C.newSession('push', 0);
   C.finishSession(s, 5);
@@ -186,6 +233,19 @@ test('reconcileActions with no session skips everything without throwing', () =>
   const r = C.reconcileActions(null, [{ seq: 1, type: 'pause' }], 10);
   assert.equal(r.applied.length, 0);
   assert.equal(r.skipped[0].reason, 'no-session');
+});
+
+test('reconcileActions never silently drops an action: every one ends up applied or skipped', () => {
+  const s = C.newSession('push', 0);
+  const actions = [{ seq: 1, type: 'bogus' }, { seq: 2, type: 'pause', ts: 0 }, { seq: 3, sessionId: 'not-this-session', type: 'resume' }];
+  const r = C.reconcileActions(s, actions, 10);
+  assert.equal(r.applied.length + r.skipped.length, actions.length);
+});
+test('reconcileActions is a no-op pass when the batch is empty', () => {
+  const s = C.newSession('push', 0);
+  const r = C.reconcileActions(s, [], 10);
+  assert.equal(r.applied.length, 0);
+  assert.equal(r.skipped.length, 0);
 });
 
 test('shouldShowNotification is true only for active/paused sessions', () => {
@@ -330,9 +390,16 @@ test('mergeSteps sums per source per day and keeps the largest source so nothing
   assert.equal(out['2026-01-01'], 5000);
 });
 test('mergeWeights keeps only the latest reading per day and converts units', () => {
+  // isoDay() buckets by local calendar day (correct - a late-night weigh-in
+  // should count for the user's local "today"), so these use local-time Date
+  // objects rather than hardcoded UTC strings: fixed UTC hours a day apart can
+  // land on different local calendar days depending on the machine's timezone
+  // (this broke under Australia/Sydney, UTC+11, during manual verification).
+  const earlier = new Date(2026, 0, 1, 8, 0, 0).toISOString();
+  const later = new Date(2026, 0, 1, 20, 0, 0).toISOString();
   const records = [
-    { time: '2026-01-01T08:00:00Z', weight: { value: 70, unit: 'kilogram' } },
-    { time: '2026-01-01T20:00:00Z', weight: { value: 69500, unit: 'gram' } },
+    { time: earlier, weight: { value: 70, unit: 'kilogram' } },
+    { time: later, weight: { value: 69500, unit: 'gram' } },
   ];
   const out = C.mergeWeights(records);
   assert.equal(out['2026-01-01'], 69.5);

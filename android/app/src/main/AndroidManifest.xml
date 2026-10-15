@@ -46,10 +46,21 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- Android 14 added a dedicated "health" foreground-service type, but it requires the
+             app to already hold a sensor/health runtime permission (BODY_SENSORS,
+             ACTIVITY_RECOGNITION, READ_HEART_RATE, etc. - see Android's FGS type docs) that this
+             app has no legitimate reason to request just to show a workout status notification.
+             Adding one of those permissions purely to qualify would be exactly the kind of
+             unrelated-permission workaround this phase's spec ruled out, so this uses the
+             "specialUse" catch-all type instead, with its required subtype declared below. -->
         <service
             android:name=".WorkoutForegroundService"
             android:exported="false"
-            android:foregroundServiceType="health" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="workout_session_status" />
+        </service>
 
         <receiver
             android:name=".WorkoutActionReceiver"
@@ -89,5 +100,5 @@
          foreground-service plumbing for showing/controlling the current workout. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 </manifest>

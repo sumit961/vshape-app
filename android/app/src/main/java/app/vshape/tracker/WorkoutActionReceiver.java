@@ -29,5 +29,21 @@ public class WorkoutActionReceiver extends BroadcastReceiver {
             default: return;
         }
         ActionQueue.enqueue(context.getApplicationContext(), type, sessionId);
+
+        // Give instant, honest feedback on the notification itself (its button
+        // taps are the only thing that must never feel stuck) without claiming
+        // the action has actually been applied - that only happens once
+        // core.js reconciles it. The service is necessarily already running,
+        // since this broadcast only fires from a tap on its own live
+        // notification, so updating it here is not a background FGS start.
+        Intent pending = new Intent(context, WorkoutForegroundService.class);
+        pending.setAction(WorkoutForegroundService.ACTION_MARK_PENDING);
+        pending.putExtra(WorkoutForegroundService.EXTRA_PENDING_TYPE, type);
+        try {
+            context.startService(pending);
+        } catch (Exception ignored) {
+            // The notification just won't show a "pending" hint this time; the
+            // next real reconciliation still corrects the displayed state.
+        }
     }
 }
