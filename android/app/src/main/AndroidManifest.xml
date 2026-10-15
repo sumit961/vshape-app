@@ -33,6 +33,34 @@
 
         </activity>
 
+        <!-- Android 14+ requires this alias so the Health Connect permission screen can show
+             the "view usage"/privacy entry for this app; it simply forwards to MainActivity. -->
+        <activity-alias
+            android:name=".ViewPermissionUsageActivity"
+            android:exported="true"
+            android:targetActivity=".MainActivity"
+            android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
+
+        <service
+            android:name=".WorkoutForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="health" />
+
+        <receiver
+            android:name=".WorkoutActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="app.vshape.tracker.action.PAUSE" />
+                <action android:name="app.vshape.tracker.action.RESUME" />
+                <action android:name="app.vshape.tracker.action.SKIP_REST" />
+            </intent-filter>
+        </receiver>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -55,4 +83,11 @@
     <uses-permission android:name="android.permission.health.READ_RESTING_HEART_RATE" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Active-workout notification (Phase 2A). No location, microphone, camera or
+         background-location permission is requested; this is strictly the notification +
+         foreground-service plumbing for showing/controlling the current workout. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
 </manifest>

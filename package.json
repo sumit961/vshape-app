@@ -4,6 +4,9 @@
   "private": true,
   "scripts": {
     "serve": "npx http-server -p 8080 -c-1 .",
+    "check": "node --check core.js && node --check app.js",
+    "test": "node --test tests/",
+    "validate": "npm run check && npm run test && npm run build",
     "build": "node scripts/copy-web.js",
     "android": "npm run build && npx cap sync android && npx cap open android"
   },

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder monochrome status-bar icon for the workout notification. Android requires a
+     flat white-on-transparent silhouette here (the full-colour app icon cannot be reused).
+     This is a simple badge shape standing in for the real V-Shape mark; swap for a proper
+     exported asset before release. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,2 L22,7 L22,17 L12,22 L2,17 L2,7 Z M12,7 L16.5,9.5 L16.5,14.5 L12,17 L7.5,14.5 L7.5,9.5 Z" />
+</vector>

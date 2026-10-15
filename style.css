@@ -73,6 +73,9 @@ h2,h3,h4{font-family:var(--font-display);font-weight:600;margin:0;text-wrap:bala
 }
 .card>h3{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
 .card.banner{display:flex;gap:12px;align-items:center;background:linear-gradient(135deg,rgba(255,255,255,.8),rgba(255,226,203,.8))}
+.card.banner.warn{background:linear-gradient(135deg,rgba(255,255,255,.85),rgba(207,58,46,.16));border-color:rgba(207,58,46,.3)}
+.card.lc{padding:14px 16px}
+.card.lc.paused{background:rgba(242,106,15,.10)}
 @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
   .card{background:rgba(255,255,255,.9)}
 }
@@ -194,6 +197,7 @@ nav button[aria-current="page"]{background:var(--accent-grad);color:#fff;box-sha
 #timer .tsub{font-size:12px;opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px}
 #timer .icon{color:#fff}
 #timer.go{background:var(--accent-grad)}
+#timer.paused{background:rgba(36,28,23,.78)}
 
 /* sheets */
 .scrim{position:fixed;inset:0;background:rgba(90,45,15,.22);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px);z-index:20;display:flex;align-items:flex-end;justify-content:center}
