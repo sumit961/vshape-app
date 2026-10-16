@@ -306,8 +306,9 @@ test('isPR is true only when the current session beats every prior session', () 
 test('migrateBlob turns a v1 day with logged sets into one finished session, invents nothing', () => {
   const raw = { profile: { targets: { kcal: 2000 } }, days: { '2026-01-01': { date: '2026-01-01', food: [], steps: 5000, w: { day: 'push', log: { 'incline-db': [{ w: 20, r: 8 }] } } } } };
   const out = C.migrateBlob(raw);
-  assert.equal(out.schema, 2);
+  assert.equal(out.schema, C.SCHEMA_VERSION);
   assert.equal(out.migrated, true);
+  assert.equal(out.plans, null); // no plans existed yet; the app seeds a default plan on load
   const day = out.days['2026-01-01'];
   assert.equal(day.sessions.length, 1);
   assert.equal(day.sessions[0].day, 'push');
@@ -320,16 +321,118 @@ test('migrateBlob leaves a day with no workout log with zero sessions', () => {
   const out = C.migrateBlob(raw);
   assert.equal(out.days['2026-01-02'].sessions.length, 0);
 });
-test('migrateBlob is a no-op (just passthrough) for data already on schema 2', () => {
-  const raw = { schema: 2, profile: { a: 1 }, days: { x: { sessions: [] } } };
+test('migrateBlob upgrades already session-shaped schema-2 data to schema 3 without altering days or sessions', () => {
+  const raw = { schema: 2, profile: { a: 1 }, days: { x: { sessions: [{ id: 's1', day: 'push', status: 'finished', log: {} }] } } };
+  const out = C.migrateBlob(raw);
+  assert.equal(out.schema, C.SCHEMA_VERSION);
+  assert.equal(out.migrated, true);
+  assert.equal(out.plans, null);
+  assert.deepEqual(out.profile, { a: 1 });
+  assert.deepEqual(out.days.x.sessions, raw.days.x.sessions);
+});
+test('migrateBlob is a no-op (just passthrough) for data already on the current schema, plans included', () => {
+  const raw = { schema: C.SCHEMA_VERSION, profile: { a: 1 }, days: { x: { sessions: [] } }, plans: [{ id: 'p1', name: 'X', days: [] }], activePlanId: 'p1' };
   const out = C.migrateBlob(raw);
   assert.equal(out.migrated, false);
   assert.deepEqual(out.profile, { a: 1 });
+  assert.deepEqual(out.plans, raw.plans);
+  assert.equal(out.activePlanId, 'p1');
 });
 test('migrateBlob refuses (locks) data from a newer schema instead of flattening it', () => {
   const out = C.migrateBlob({ schema: 99, profile: {}, days: {} });
   assert.equal(out.locked, true);
   assert.equal(out.schemaFound, 99);
+});
+
+/* ---------- workout plans ---------- */
+test('createPlan appends a new empty plan and duplicatePlan copies it with fresh plan/day ids but the same exercise ids', () => {
+  const plans = [];
+  const p = C.createPlan(plans, 'Push A', 1000);
+  const day = C.newPlanDay('Day 1', 1000);
+  C.addExerciseToDay(day, { id: 'incline-db', name: 'Incline DB Press', sets: 3, muscle: 'Chest' });
+  C.addDayToPlan(p, day);
+  const copy = C.duplicatePlan(plans, p.id, 'Push A copy', 2000);
+  assert.equal(plans.length, 2);
+  assert.notEqual(copy.id, p.id);
+  assert.notEqual(copy.days[0].id, day.id);
+  assert.equal(copy.days[0].ex[0].id, 'incline-db'); // exercise identity preserved for progression history
+  copy.days[0].name = 'Changed';
+  assert.notEqual(p.days[0].name, 'Changed'); // editing the copy never touches the original
+});
+test('deletePlan refuses to remove the last remaining plan', () => {
+  const plans = [C.newPlan('Only', 0)];
+  const r = C.deletePlan(plans, plans[0].id, plans[0].id);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'last-plan');
+  assert.equal(plans.length, 1);
+});
+test('deletePlan removes a non-active plan without touching which plan is active', () => {
+  const plans = [C.newPlan('A', 0), C.newPlan('B', 1)];
+  const r = C.deletePlan(plans, plans[1].id, plans[0].id);
+  assert.equal(r.ok, true);
+  assert.equal(r.newActivePlanId, undefined);
+  assert.equal(plans.length, 1);
+});
+test('deletePlan removing the active plan hands back a new active plan id', () => {
+  const plans = [C.newPlan('A', 0), C.newPlan('B', 1)];
+  const r = C.deletePlan(plans, plans[0].id, plans[0].id);
+  assert.equal(r.ok, true);
+  assert.equal(r.newActivePlanId, plans[0].id); // plans[1] ('B') shifted into index 0 after splice
+});
+test('addExerciseToDay/removeExerciseFromDay/moveExerciseInDay manage a day exercise list in place', () => {
+  const day = C.newPlanDay('Day', 0);
+  C.addExerciseToDay(day, { id: 'a', name: 'A' });
+  C.addExerciseToDay(day, { id: 'b', name: 'B' });
+  assert.deepEqual(day.ex.map(e => e.id), ['a', 'b']);
+  assert.equal(C.moveExerciseInDay(day, 'b', -1), true);
+  assert.deepEqual(day.ex.map(e => e.id), ['b', 'a']);
+  assert.equal(C.moveExerciseInDay(day, 'b', -1), false); // already first
+  assert.equal(C.removeExerciseFromDay(day, 'a'), true);
+  assert.deepEqual(day.ex.map(e => e.id), ['b']);
+});
+test('substituteExerciseInDay replaces an exercise in place, keeping its position', () => {
+  const day = C.newPlanDay('Day', 0);
+  C.addExerciseToDay(day, { id: 'a', name: 'A' });
+  C.addExerciseToDay(day, { id: 'b', name: 'B' });
+  C.substituteExerciseInDay(day, 'a', { id: 'c', name: 'C' });
+  assert.deepEqual(day.ex.map(e => e.id), ['c', 'b']);
+});
+test('planDayForWeekday finds the training day scheduled for a given weekday and ignores rest days', () => {
+  const plan = C.newPlan('P', 0);
+  const push = C.newPlanDay('Push', 0); push.weekdays = [1];
+  const rest = C.newPlanDay('Rest', 0); rest.rest = true; rest.weekdays = [1];
+  C.addDayToPlan(plan, push); C.addDayToPlan(plan, rest);
+  assert.equal(C.planDayForWeekday(plan, 1), push);
+  assert.equal(C.planDayForWeekday(plan, 2), null);
+});
+test('newSession captures a plan/day snapshot that stays frozen after the source day is later edited', () => {
+  const day = C.newPlanDay('Push', 0);
+  C.addExerciseToDay(day, { id: 'incline-db', name: 'Incline DB Press', sets: 3, muscle: 'Chest' });
+  const s = C.newSession('d1', 0, null, { planId: 'p1', dayId: day.id, dayName: day.name, exSnapshot: JSON.parse(JSON.stringify(day.ex)) });
+  day.ex[0].name = 'Renamed Press'; // simulate a later plan edit
+  assert.equal(s.exSnapshot[0].name, 'Incline DB Press');
+  assert.equal(s.dayName, 'Push');
+  assert.equal(s.planId, 'p1');
+});
+test('weeklyVolumeByMuscle sums logged volume per muscle group from each session\'s own snapshot, excluding timed work', () => {
+  const s1 = C.newSession('d1', 0, null, { exSnapshot: [{ id: 'a', muscle: 'Chest', timed: false }, { id: 'b', muscle: 'Legs', timed: true }] });
+  C.logSetIntoSession(s1, { id: 'a' }, 0, { w: 10, r: 8 });
+  C.logSetIntoSession(s1, { id: 'b' }, 0, { w: 0, r: 30 });
+  const s2 = C.newSession('d2', 0, null, { exSnapshot: [{ id: 'a', muscle: 'Chest', timed: false }] });
+  C.logSetIntoSession(s2, { id: 'a' }, 0, { w: 20, r: 5 });
+  const vol = C.weeklyVolumeByMuscle([s1, s2]);
+  assert.equal(vol.Chest, 180);
+  assert.equal(vol.Legs, undefined);
+});
+test('weeklyVolumeByMuscle is immune to the plan being edited after the session was logged', () => {
+  const day = C.newPlanDay('Push', 0);
+  C.addExerciseToDay(day, { id: 'a', name: 'A', muscle: 'Chest', timed: false });
+  const s = C.newSession('d1', 0, null, { exSnapshot: JSON.parse(JSON.stringify(day.ex)) });
+  C.logSetIntoSession(s, { id: 'a' }, 0, { w: 10, r: 10 });
+  day.ex[0].muscle = 'Shoulders'; // edit the live plan afterwards
+  const vol = C.weeklyVolumeByMuscle([s]);
+  assert.equal(vol.Chest, 100);
+  assert.equal(vol.Shoulders, undefined);
 });
 
 test('quarantineInvalidSets moves bad entries out without losing the day data, and cleans up empty logs', () => {

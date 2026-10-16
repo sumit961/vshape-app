@@ -27,10 +27,13 @@ var IC={
   check:'<svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>'
 };
 
-/* ---------- program (from the printed 5-day plan) ---------- */
-/* start = rough first-session load in kg for a 70 kg lifter; per-hand for dumbbells, per-side for cables. inc = smallest sensible jump. */
+/* ---------- default plan (from the printed 5-day plan) ---------- */
+/* start = rough first-session load in kg for a 70 kg lifter; per-hand for dumbbells, per-side for cables. inc = smallest sensible jump.
+   This is only the SEED data for the default plan created on first install (or on migration from a
+   version of the app that had no plans at all). Once seeded, S.plans is the live source of truth and
+   this object is never read again - the plan builder edits S.plans, not this. */
 function X(id,name,sets,lo,hi,rest,inc,start,muscle,cue,o){return Object.assign({id:id,name:name,sets:sets,lo:lo,hi:hi,rest:rest,inc:inc,start:start,muscle:muscle,cue:cue},o||{})}
-var PROGRAM={
+var DEFAULT_PROGRAM={
   push:{name:'Push A',tag:'Chest, shoulders, triceps',cue:'Controlled lowering. When you hit the top of the rep range on every set, add weight.',ex:[
     X('incline-db','Incline Dumbbell Press',3,6,10,150,2,18,'Upper chest','Bench 15-30 degrees. Control the lowering, press up and slightly inward.'),
     X('machine-chest','Machine Chest Press',2,8,12,120,5,40,'Chest','Shoulder blades steady, full comfortable range, no bouncing.'),
@@ -72,9 +75,33 @@ var PROGRAM={
     X('knee-raise','Hanging Knee Raise',2,10,15,75,0,0,'Lower abs','Tilt pelvis upward, no swinging.',{bw:true}),
     X('pallof','Pallof Press',2,10,12,75,2.5,10,'Obliques and core, per side','Press straight out, resist the cable pulling you into rotation.')]}
 };
-var DAY_ORDER=['push','pull','legsA','upper','lower'];
-var WEEKDAY={1:'push',2:'pull',3:'legsA',5:'upper',6:'lower'};
-var EXLIST=(function(){var m={};DAY_ORDER.forEach(function(k){PROGRAM[k].ex.forEach(function(e){if(!m[e.id])m[e.id]=e})});return m})();
+var DEFAULT_DAY_ORDER=['push','pull','legsA','upper','lower'];
+var DEFAULT_WEEKDAY={1:'push',2:'pull',3:'legsA',5:'upper',6:'lower'};
+function buildDefaultPlan(){
+  var plan=VShapeCore.newPlan('Default 5-Day Split',0);
+  DEFAULT_DAY_ORDER.forEach(function(k){
+    var src=DEFAULT_PROGRAM[k];
+    var day=VShapeCore.newPlanDay(src.name,0);
+    // The seeded default plan's day ids MUST stay equal to the old literal
+    // program keys ('push'/'pull'/...), not a freshly generated id: every
+    // session created before plans existed has session.day set to one of
+    // these literal keys, and openSessionFor/lastSessionFor match sessions
+    // by exact day-id equality. A random id here would silently orphan every
+    // pre-existing finished session from the Train tab's per-day lookup
+    // (it would still exist in storage and still count in history/PR/volume,
+    // which don't filter by day id - but it would wrongly look "not logged"
+    // the moment you revisited that date in Train).
+    day.id=k;
+    day.tag=src.tag;day.cue=src.cue;day.rest=false;
+    day.ex=src.ex.map(function(e){return Object.assign({},e)});
+    VShapeCore.addDayToPlan(plan,day);
+  });
+  Object.keys(DEFAULT_WEEKDAY).forEach(function(wd){
+    var day=VShapeCore.findPlanDay(plan,DEFAULT_WEEKDAY[wd]);
+    if(day)day.weekdays.push(Number(wd));
+  });
+  return plan;
+}
 
 /* ---------- food library ---------- */
 /* macros are per "per" units */
@@ -113,24 +140,54 @@ var TPL=[
 /* ---------- state + storage ---------- */
 var LS='vshape-tracker-v1';
 function defProfile(){return {targets:{kcal:2350,protein:160,steps:20000,water:3000},weights:{},customFoods:[],baseline:null,notifPermission:null}}
-var S={profile:defProfile(),days:{},photos:{},active:null,locked:false,lockReason:null,lockedSchemaFound:null};
+var S={profile:defProfile(),days:{},photos:{},plans:null,activePlanId:null,active:null,locked:false,lockReason:null,lockedSchemaFound:null};
 var ui={tab:'today',date:todayISO(),today:todayISO(),wd:null,sheet:null,drafts:{},timer:null,exSel:'incline-db',dirty:false,storageOk:true,storageMsg:null,hcDenied:false,lastNotifError:null};
 var installEvt=null;
 
 function saveLocal(){
   if(S.locked)return;
   try{
-    localStorage.setItem(LS,JSON.stringify({schema:VShapeCore.SCHEMA_VERSION,profile:S.profile,days:S.days,active:S.active||null}));
+    localStorage.setItem(LS,JSON.stringify({schema:VShapeCore.SCHEMA_VERSION,profile:S.profile,days:S.days,active:S.active||null,plans:S.plans,activePlanId:S.activePlanId}));
     ui.storageOk=true;
   }catch(e){
     ui.storageOk=false;
     ui.storageMsg=(e&&e.name==='QuotaExceededError')?'Storage is full. Export a backup, then free up space on your device.':'Could not save your last change ('+(e&&e.message||'unknown error')+').';
   }
 }
+/* A fresh install, or data upgraded from a version with no plans concept yet,
+   needs a starting plan: seed the built-in default so the Train tab always
+   has something to show. Never runs once S.plans already has at least one
+   plan - it only fills a genuine gap. */
+function ensurePlans(plansIn,activeIn){
+  var plans=(plansIn&&plansIn.length)?plansIn:null;
+  var activePlanId=activeIn||null;
+  if(!plans){var p=buildDefaultPlan();plans=[p];activePlanId=p.id;}
+  if(!VShapeCore.findPlan(plans,activePlanId))activePlanId=plans[0].id;
+  return {plans:plans,activePlanId:activePlanId};
+}
+/* Sessions created before plans existed have no exSnapshot; backfill one from
+   whatever exercise ids they actually logged, using the plan we just seeded
+   (which is built from the same program the app always used), so quarantine
+   checks, the strength chart and volume analytics all have something to work
+   with immediately instead of silently dropping old history. */
+function backfillSessionSnapshots(){
+  var flat=flatExerciseLookup();
+  Object.keys(S.days).forEach(function(d){
+    (S.days[d].sessions||[]).forEach(function(session){
+      if(session.exSnapshot&&session.exSnapshot.length)return;
+      var snap=[];
+      Object.keys(session.log||{}).forEach(function(exId){var e=flat[exId];if(e)snap.push(Object.assign({},e))});
+      session.exSnapshot=snap;
+    });
+  });
+}
 function loadLocal(){
   var raw;
   try{raw=localStorage.getItem(LS)}catch(e){raw=null}
-  if(!raw)return;
+  if(!raw){
+    var pr0=ensurePlans(null,null);S.plans=pr0.plans;S.activePlanId=pr0.activePlanId;
+    return;
+  }
   var parsed;
   try{parsed=JSON.parse(raw)}catch(e){S.locked=true;S.lockReason='corrupt';return}
   var out=VShapeCore.migrateBlob(parsed);
@@ -146,14 +203,19 @@ function loadLocal(){
   if(!S.profile.weights)S.profile.weights={};
   if(!S.profile.customFoods)S.profile.customFoods=[];
   S.days=out.days||{};
-  Object.keys(S.days).forEach(function(d){VShapeCore.quarantineInvalidSets(S.days[d],EXLIST)});
+  var plansHadNone=!(out.plans&&out.plans.length);
+  var pr=ensurePlans(out.plans,out.activePlanId);
+  S.plans=pr.plans;S.activePlanId=pr.activePlanId;
+  backfillSessionSnapshots();
+  var flat=flatExerciseLookup();
+  Object.keys(S.days).forEach(function(d){VShapeCore.quarantineInvalidSets(S.days[d],flat)});
   S.active=parsed.active||null;
   if(S.active){
     var ad=S.days[S.active.date],asess=ad&&VShapeCore.findSessionById(ad,S.active.id);
     if(!asess||!(asess.status==='active'||asess.status==='paused')){S.active=null}
     else{ui.tab='train';ui.date=S.active.date;ui.wd=asess.day}
   }
-  if(out.migrated)saveLocal();
+  if(out.migrated||plansHadNone)saveLocal();
 }
 function ensureDay(d){
   if(!S.days[d])S.days[d]={date:d,food:[],steps:0,stepsSource:null,water:0,sessions:[],quarantine:{sets:[],food:[]}};
@@ -166,6 +228,41 @@ function ensureDay(d){
 function queueSave(){saveLocal()}
 function saveDay(d){queueSave('day-'+d)}
 function saveProfile(){queueSave('profile')}
+
+/* ---------- plans (bridges S.plans onto VShapeCore's pure plan model) ---------- */
+function activePlan(){return VShapeCore.findPlan(S.plans,S.activePlanId)}
+function dayById(dayId){var p=activePlan();return p?VShapeCore.findPlanDay(p,dayId):null}
+function planDays(){var p=activePlan();return p?p.days:[]}
+function autoDay(d){
+  var wd=parseISO(d).getDay(),day=VShapeCore.planDayForWeekday(activePlan(),wd);
+  return day?day.id:'rest';
+}
+/* Flat id->exercise map across every current plan's every day. Used only as
+   a fallback (quarantine validation on legacy data, the plan picker, the
+   strength chart) - anything about an already-started or already-finished
+   session always prefers that session's own frozen exSnapshot instead, so
+   editing a plan later never rewrites history. */
+function flatExerciseLookup(){
+  var m={};
+  (S.plans||[]).forEach(function(p){(p.days||[]).forEach(function(d){(d.ex||[]).forEach(function(e){if(!m[e.id])m[e.id]=e})})});
+  return m;
+}
+/* Every exercise id the user has ever trained, for the strength-chart picker
+   and the plan-builder's "pick an existing exercise" list: live plans first,
+   then anything only history remembers (e.g. an exercise since removed from
+   every plan). */
+function allKnownExercises(){
+  var m=flatExerciseLookup();
+  Object.keys(S.days).forEach(function(d){
+    (S.days[d].sessions||[]).forEach(function(session){
+      (session.exSnapshot||[]).forEach(function(e){if(!m[e.id])m[e.id]=e});
+    });
+  });
+  return m;
+}
+function sessionDayView(session){
+  return {id:session.dayId||null,name:session.dayName||'Workout',tag:session.dayTag||'',cue:session.dayCue||'',ex:session.exSnapshot||[]};
+}
 
 /* ---------- sessions (bridges S/ui onto VShapeCore's pure session model) ---------- */
 /* openSessionFor/lastSessionFor never return the same thing once a session is
@@ -185,12 +282,26 @@ function getOpenSessionAnywhere(){
   var s=VShapeCore.findSessionById(day,S.active.id);
   return (s&&(s.status==='active'||s.status==='paused'))?s:null;
 }
+/* The day actually being trained right now: an open session pins to what it
+   snapshotted at start, so a plan edit mid-workout can't shift sets/targets
+   under the lifter's feet; otherwise it's whatever the active plan currently
+   says this day looks like. */
+function trainDayView(date,dayKey){
+  if(dayKey==='rest')return null;
+  var session=openSessionFor(date,dayKey);
+  return session?sessionDayView(session):dayById(dayKey);
+}
 function startOrGetSession(date,dayKey){
   var day=ensureDay(date);
   var decision=VShapeCore.decideSessionStart(day,dayKey,getOpenSessionAnywhere());
   if(decision.action==='reuse')return {session:decision.session,created:false};
   if(decision.action==='blocked')return {blocked:true,blockingSession:decision.blockingSession};
-  var s=VShapeCore.newSession(dayKey,Date.now());
+  var liveDay=dayById(dayKey);
+  var s=VShapeCore.newSession(dayKey,Date.now(),null,{
+    planId:S.activePlanId,dayId:dayKey,
+    dayName:liveDay?liveDay.name:null,dayTag:liveDay?liveDay.tag:null,dayCue:liveDay?liveDay.cue:null,
+    exSnapshot:liveDay?clone(liveDay.ex):[]
+  });
   day.sessions.push(s);
   S.active={date:date,id:s.id};
   return {session:s,created:true};
@@ -333,7 +444,6 @@ function totals(d){
   var f=(S.days[d]&&S.days[d].food)||[];
   return f.reduce(function(a,e){return {k:a.k+e.k,p:a.p+e.p,c:a.c+e.c,f:a.f+e.f}},{k:0,p:0,c:0,f:0});
 }
-function autoDay(d){var w=parseISO(d).getDay();return WEEKDAY[w]||'rest'}
 function curWd(){
   if(ui.wd)return ui.wd;
   var day=S.days[ui.date];
@@ -401,7 +511,7 @@ function header(){
   '<div class="datenav"><button class="icon" data-act="dprev" aria-label="Previous day">&#8249;</button><button class="dlabel" data-act="dtoday" aria-label="Jump to today">'+(isT?'Today, ':'')+esc(fmtDate(ui.date))+'</button><button class="icon" data-act="dnext" aria-label="Next day"'+(isT?' disabled':'')+'>&#8250;</button></div></header>';
 }
 function setsDone(key,date){
-  var P=PROGRAM[key];if(!P)return {done:0,total:0,vol:0};
+  var P=trainDayView(date,key);if(!P)return {done:0,total:0,vol:0};
   return VShapeCore.sessionSetsDone(openSessionFor(date,key),P);
 }
 function gymDone(d){
@@ -446,7 +556,7 @@ function viewToday(){
   var T=S.profile.targets,d=S.days[ui.date],tot=totals(ui.date),steps=(d&&d.steps)||0;
   var remK=T.kcal-tot.k,remP=T.protein-tot.p;
   var rem=(remK>=0?num(remK)+' kcal left':num(-remK)+' kcal over')+' and '+(remP>0?num(remP)+' g protein to go':'protein target met');
-  var key=curWd(),P=PROGRAM[key],sd=P?setsDone(key,ui.date):null;
+  var key=curWd(),P=trainDayView(ui.date,key),sd=P?setsDone(key,ui.date):null;
   var wc=weeklyCheck(),wToday=S.profile.weights[ui.date];
   var train=P?'<div class="row"><div class="grow"><div class="num" style="font-size:26px;font-weight:700">'+esc(P.name)+'</div><div class="muted small">'+esc(P.tag)+'</div></div><div class="num" style="font-size:22px;font-weight:600">'+sd.done+'/'+sd.total+'<span class="muted small"> sets</span></div></div><button class="btn full" style="margin-top:12px" data-act="tab" data-tab="train">'+(sd.done?'Continue workout':'Open workout')+'</button>':'<div class="muted">Rest day. Normal work and walking are enough. You can still open a session from the Train tab.</div>';
   return installBanner()+heroHTML()+weekStrip()+'<div class="card"><div class="rings">'+ring(tot.k,T.kcal,'var(--accent)','Calories','kcal')+ring(tot.p,T.protein,'var(--protein)','Protein','g')+ring(steps,T.steps,'var(--steps)','Steps','steps')+'</div><div class="rem">'+rem+'</div><div class="muted small" style="margin-top:6px">Carbs '+num(tot.c)+' g &middot; Fat '+num(tot.f)+' g</div></div>'+
@@ -485,7 +595,7 @@ function lifecycleBar(openSession,lastSession,P){
   if(!openSession){
     if(lastSession&&lastSession.status==='finished'){
       var doneTxt=fmtClock(VShapeCore.sessionElapsedMs(lastSession,Date.now()));
-      return '<div class="card lc"><div class="row"><div class="grow muted small">Finished '+esc(P?P.name:'workout')+' &middot; '+doneTxt+' elapsed.</div><button class="btn ghost sm" data-act="startworkout">Start another</button></div></div>';
+      return '<div class="card lc"><div class="row"><div class="grow muted small">Finished '+esc(lastSession.dayName||(P?P.name:'workout'))+' &middot; '+doneTxt+' elapsed.</div><button class="btn ghost sm" data-act="startworkout">Start another</button></div></div>';
     }
     return '<div class="card lc"><button class="btn full" data-act="startworkout">Start workout</button></div>';
   }
@@ -497,9 +607,17 @@ function lifecycleBar(openSession,lastSession,P){
     '<button class="btn ghost sm" style="margin-left:6px" data-act="finishworkout">Finish</button></div></div>';
 }
 function viewTrain(){
-  var key=curWd(),pills='<div class="pills" role="group" aria-label="Workout day">'+DAY_ORDER.map(function(k){return '<button class="pill" data-act="wd" data-k="'+k+'" aria-pressed="'+(k===key)+'">'+esc(PROGRAM[k].name)+'</button>'}).join('')+'</div>';
-  if(key==='rest')return pills+'<div class="card"><h3>Rest day</h3><p style="margin:0">Thursday and Sunday are for recovery. Normal work and walking are enough. Pick a session above if you want to train anyway.</p></div>';
-  var P=PROGRAM[key],sd=setsDone(key,ui.date),session=openSessionFor(ui.date,key),log=(session&&session.log)||{};
+  var key=curWd(),trainable=planDays().filter(function(d){return !d.rest});
+  var pills='<div class="pills" role="group" aria-label="Workout day">'+trainable.map(function(d){return '<button class="pill" data-act="wd" data-k="'+d.id+'" aria-pressed="'+(d.id===key)+'">'+esc(d.name)+'</button>'}).join('')+'</div>';
+  if(key==='rest'){
+    var wdNum=parseISO(ui.date).getDay();
+    var restDay=planDays().filter(function(d){return d.rest&&(d.weekdays||[]).indexOf(wdNum)>=0})[0];
+    var msg=restDay&&restDay.cue?restDay.cue:'Normal work and walking are enough. Pick a session above if you want to train anyway.';
+    return pills+'<div class="card"><h3>'+esc(restDay?restDay.name:'Rest day')+'</h3><p style="margin:0">'+esc(msg)+'</p></div>';
+  }
+  var P=trainDayView(ui.date,key);
+  if(!P)return pills+'<div class="card"><h3>No plan day</h3><p style="margin:0">This day is no longer in your active plan. Pick a session above.</p></div>';
+  var sd=setsDone(key,ui.date),session=openSessionFor(ui.date,key),log=(session&&session.log)||{};
   var out=pills+lifecycleBar(session,lastSessionFor(ui.date,key),P)+'<div class="card"><div class="row">'+'<div class="grow"><div class="num" style="font-size:30px;font-weight:700;line-height:1.1">'+esc(P.name)+'</div><div class="muted small">'+esc(P.tag)+'</div></div><div style="text-align:right"><div class="num" style="font-size:24px;font-weight:700">'+sd.done+'/'+sd.total+'</div><div class="muted small">'+(sd.vol?num(sd.vol)+' kg volume':'sets done')+'</div></div></div><div class="cue">'+esc(P.cue)+'</div></div>';
   P.ex.forEach(function(ex){
     var sg=suggest(ex,ui.date),rows='',logged=log[ex.id]||[];
@@ -547,6 +665,24 @@ function lineChart(pts,unit){
   return s+'</svg>';
 }
 function lastDays(n){var a=[],t=todayISO();for(var i=n-1;i>=0;i--)a.push(addDays(t,-i));return a}
+function sessionsInRange(fromD,toD){
+  var out=[];
+  Object.keys(S.days).forEach(function(d){
+    if(d<fromD||d>toD)return;
+    (S.days[d].sessions||[]).forEach(function(s){out.push(s)});
+  });
+  return out;
+}
+function weeklyVolumeCard(){
+  var days=lastDays(7),vol=VShapeCore.weeklyVolumeByMuscle(sessionsInRange(days[0],days[days.length-1]));
+  var entries=Object.keys(vol).map(function(m){return {m:m,v:vol[m]}}).sort(function(a,b){return b.v-a.v});
+  if(!entries.length)return '<div class="card"><h3>Training volume, last 7 days</h3><div class="empty">Log some sets this week to see volume by muscle group.</div></div>';
+  var max=entries[0].v;
+  return '<div class="card"><h3>Training volume, last 7 days</h3>'+entries.map(function(e){
+    var pct=Math.max(4,Math.round(e.v/max*100));
+    return '<div class="volrow"><div class="row"><span class="grow">'+esc(e.m)+'</span><b class="num">'+num(e.v)+' kg</b></div><div class="pb"><i style="width:'+pct+'%;background:var(--accent)"></i></div></div>';
+  }).join('')+'</div>';
+}
 function viewProgress(){
   var T=S.profile.targets,days=lastDays(14),steps=days.map(function(d){return (S.days[d]&&S.days[d].steps)||0}),kc=days.map(function(d){return Math.round(totals(d).k)});
   var stepDays=steps.filter(Boolean),kDays=days.filter(function(d){return totals(d).k>0});
@@ -561,12 +697,15 @@ function viewProgress(){
   out+=viewPhotos();
   out+='<div class="card"><h3>Steps, last 14 days</h3>'+barChart(steps,days,T.steps)+'<div class="stat"><div><b>'+num(avgS)+'</b><div class="muted small">average on logged days</div></div><div><b>'+steps.filter(function(s){return s>=T.steps}).length+'</b><div class="muted small">days on target</div></div></div></div>';
   out+='<div class="card"><h3>Calories, last 14 days</h3>'+barChart(kc,days,T.kcal)+'<div class="stat"><div><b>'+num(avgK)+'</b><div class="muted small">average kcal logged</div></div><div><b>'+num(avgP)+' g</b><div class="muted small">average protein</div></div></div></div>';
-  var opts=Object.keys(EXLIST).map(function(id){var n=history(id).length;return '<option value="'+id+'"'+(id===ui.exSel?' selected':'')+'>'+esc(EXLIST[id].name)+(n?' ('+n+')':'')+'</option>'}).join('');
-  var ex=EXLIST[ui.exSel]||EXLIST['incline-db'],h=history(ex.id),pts=h.map(function(s){
+  out+=weeklyVolumeCard();
+  var exlist=allKnownExercises(),exIds=Object.keys(exlist);
+  var opts=exIds.map(function(id){var n=history(id).length;return '<option value="'+id+'"'+(id===ui.exSel?' selected':'')+'>'+esc(exlist[id].name)+(n?' ('+n+')':'')+'</option>'}).join('');
+  var ex=exlist[ui.exSel]||exlist[exIds[0]],h=ex?history(ex.id):[],pts=h.map(function(s){
     var v;if(ex.timed)v=Math.max.apply(null,s.sets.map(function(x){return x.r}));
     else if(ex.bw&&s.sets.every(function(x){return !x.w}))v=Math.max.apply(null,s.sets.map(function(x){return x.r}));
     else v=Math.max.apply(null,s.sets.map(function(x){return x.w*(1+x.r/30)}));
     return {d:s.d,v:v}});
+  if(!ex)return out+'<div class="card"><h3>Strength</h3><div class="empty">Add an exercise to a plan to start tracking strength.</div></div>';
   var unit=ex.timed||(ex.bw&&h.length&&h.every(function(s){return s.sets.every(function(x){return !x.w})}))?(ex.timed?'s':'reps'):'kg';
   out+='<div class="card"><h3>Strength</h3><select id="exsel" aria-label="Exercise">'+opts+'</select><div style="margin-top:10px">'+(pts.length?lineChart(pts,unit):'<div class="empty">No sets logged for this exercise yet.</div>')+'</div>'+(pts.length?'<div class="muted small">'+(unit==='kg'?'Estimated one-rep max from your best set each session.':'Best set each session.')+'</div>':'')+'</div>';
   return out;
@@ -624,7 +763,7 @@ function pushNotificationState(){
   var plugin=wnPlugin();if(!plugin||!isNative())return;
   var s=getOpenSessionAnywhere();
   if(!VShapeCore.shouldShowNotification(s)){if(plugin.hide)Promise.resolve(plugin.hide()).catch(function(err){console&&console.warn&&console.warn('WorkoutNotification.hide failed',err)});return}
-  var P=PROGRAM[s.day],sd=VShapeCore.sessionSetsDone(s,P);
+  var P=sessionDayView(s),sd=VShapeCore.sessionSetsDone(s,P);
   var payload={
     sessionId:s.id,title:P?P.name:'Workout',status:s.status,
     startedAtEpochMs:s.startedAt,pausedMs:s.pausedMs||0,
@@ -704,6 +843,9 @@ function drawSheet(){
   else if(s.type==='photo')body=photoHTML();
   else if(s.type==='import')body=importHTML();
   else if(s.type==='finish')body=finishHTML();
+  else if(s.type==='plan')body=planEditHTML();
+  else if(s.type==='planday')body=planDayHTML();
+  else if(s.type==='planex')body=planExHTML();
   $('#sheet-root').innerHTML='<div class="scrim" data-act="scrim"><div class="sheet" role="dialog" aria-modal="true">'+body+'</div></div>';
   if(s.type==='add'&&s.sel)updatePreview();
 }
@@ -738,11 +880,83 @@ function settingsHTML(){
   '<div class="two"><label class="fld" for="b-w">Weight (kg)<input id="b-w" inputmode="decimal" value="'+(bl.weight!=null?bl.weight:'')+'"></label><label class="fld" for="b-bf">Body fat %<input id="b-bf" inputmode="decimal" value="'+(bl.bodyFatPct!=null?bl.bodyFatPct:'')+'"></label></div>'+
   '<label class="fld" for="b-date">Scan date or label<input id="b-date" placeholder="e.g. 17 Sep scan" value="'+esc(bl.label||'')+'"></label>'+
   '<button class="btn ghost full" style="margin-top:8px" data-act="savebaseline">Save baseline</button>'+
+  '<h4 class="sh4">Workout plans</h4>'+
+  (S.plans||[]).map(function(p){
+    return '<div class="listrow"><button class="grow planname" data-act="planactivate" data-id="'+p.id+'">'+(p.id===S.activePlanId?'&#9679;':'&#9675;')+' <b>'+esc(p.name)+'</b><div class="muted small">'+p.days.length+' day'+(p.days.length===1?'':'s')+(p.id===S.activePlanId?' &middot; active':'')+'</div></button>'+
+      '<button class="icon sm" data-act="planedit" data-id="'+p.id+'" aria-label="Edit '+esc(p.name)+'">&#9998;</button>'+
+      '<button class="icon sm" data-act="plandup" data-id="'+p.id+'" aria-label="Duplicate '+esc(p.name)+'">&#10064;</button>'+
+      (S.plans.length>1?'<button class="icon sm" data-act="plandel" data-id="'+p.id+'" aria-label="Delete '+esc(p.name)+'">&times;</button>':'')+
+    '</div>';
+  }).join('')+
+  '<button class="btn ghost full" style="margin-top:8px" data-act="plannew">+ New plan</button>'+
   (isNative()?'<h4 class="sh4">Workout notifications</h4><p class="muted small" style="margin:0 0 10px">'+(S.profile.notifPermission==='granted'?'On. You will see your active workout in the notification shade.':S.profile.notifPermission==='denied'?'Off. The workout still tracks fine inside the app.':'Not set up yet.')+'</p><button class="btn ghost full" data-act="requestworkoutnotif">'+(S.profile.notifPermission==='granted'?'Check permission again':'Enable workout notifications')+'</button>':'')+
   '<h4 class="sh4">Your data</h4><p class="muted small" style="margin:0 0 10px">Everything is stored on this phone only. Export a backup now and then, and always before you clear browser data or change phones.</p>'+
   '<div class="two"><button class="btn ghost" data-act="exportdata">Export backup</button><button class="btn ghost" data-act="importdata">Restore backup</button></div>'+
   '<button class="btn ghost full" style="margin-top:8px" data-act="recoversafety">Recover saved copies</button>'+
   (isStandalone()?'':'<h4 class="sh4">Install</h4><p class="muted small" style="margin:0">'+(installEvt?'<button class="btn full" data-act="installapp">Install app</button>':'In Chrome or Samsung Internet, open the menu and choose Add to Home screen or Install app.')+'</p>');
+}
+var WEEKDAY_NAMES=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+function planEditHTML(){
+  var s=ui.sheet,plan=VShapeCore.findPlan(S.plans,s.planId);
+  if(!plan)return '<div class="sh-h"><h3>Plan</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div><div class="empty">That plan no longer exists.</div>';
+  var head='<div class="sh-h"><button class="icon" data-act="planback" aria-label="Back">&#8249;</button><h3>Edit plan</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div>'+
+    '<label class="fld" for="pl-name">Plan name<input id="pl-name" value="'+esc(plan.name)+'" data-planid="'+plan.id+'"></label>';
+  var days=plan.days.map(function(d,i){
+    var wds=(d.weekdays||[]).slice().sort().map(function(w){return WEEKDAY_NAMES[w]}).join(', ')||'Not scheduled';
+    return '<div class="listrow"><button class="grow planname" data-act="daysel" data-id="'+d.id+'"><b>'+esc(d.name)+'</b>'+(d.rest?' <span class="muted small">(rest)</span>':'')+'<div class="muted small">'+esc(wds)+(d.rest?'':' &middot; '+d.ex.length+' exercise'+(d.ex.length===1?'':'s'))+'</div></button>'+
+      (i>0?'<button class="icon sm" data-act="daymoveup" data-id="'+d.id+'" aria-label="Move '+esc(d.name)+' up">&uarr;</button>':'')+
+      (i<plan.days.length-1?'<button class="icon sm" data-act="daymovedown" data-id="'+d.id+'" aria-label="Move '+esc(d.name)+' down">&darr;</button>':'')+
+      '<button class="icon sm" data-act="daydel" data-id="'+d.id+'" aria-label="Delete '+esc(d.name)+'">&times;</button></div>';
+  }).join('');
+  return head+'<h4 class="sh4">Days</h4>'+(days||'<div class="empty">No days yet. Add one below.</div>')+'<button class="btn ghost full" style="margin-top:8px" data-act="dayadd" data-planid="'+plan.id+'">+ Add day</button>';
+}
+function planDayHTML(){
+  var s=ui.sheet,plan=VShapeCore.findPlan(S.plans,s.planId),day=plan&&VShapeCore.findPlanDay(plan,s.dayId);
+  if(!plan||!day)return '<div class="sh-h"><h3>Day</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div><div class="empty">That day no longer exists.</div>';
+  var head='<div class="sh-h"><button class="icon" data-act="daybacktoplan" aria-label="Back">&#8249;</button><h3>Edit day</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div>';
+  var wdChips='<div class="pills" role="group" aria-label="Scheduled on">'+WEEKDAY_NAMES.map(function(n,i){return '<button class="pill" data-act="daywd" data-wd="'+i+'" aria-pressed="'+((day.weekdays||[]).indexOf(i)>=0)+'">'+n+'</button>'}).join('')+'</div>';
+  var fields='<label class="fld" for="pd-name">Day name<input id="pd-name" value="'+esc(day.name)+'"></label>'+
+    '<label class="fld" for="pd-tag">Short description<input id="pd-tag" value="'+esc(day.tag||'')+'"></label>'+
+    '<label class="fld" for="pd-cue">Coaching cue<input id="pd-cue" value="'+esc(day.cue||'')+'"></label>'+
+    '<button class="chip'+(day.rest?' on':'')+'" style="margin-top:10px" data-act="daytogglerest" aria-pressed="'+!!day.rest+'">'+(day.rest?'Rest day &#10003;':'Mark as a rest day')+'</button>'+
+    '<h4 class="sh4">Scheduled on</h4>'+wdChips+
+    '<button class="btn full" style="margin-top:14px" data-act="daysave">Save day details</button>';
+  if(day.rest)return head+fields;
+  var exRows=day.ex.map(function(e,i){
+    return '<div class="listrow"><div class="grow"><b>'+esc(e.name)+'</b><div class="muted small">'+esc(e.muscle||'')+' &middot; '+e.sets+' x '+e.lo+'&ndash;'+e.hi+(e.timed?'s':'')+' &middot; rest '+e.rest+'s</div></div>'+
+      (i>0?'<button class="icon sm" data-act="exmoveup" data-id="'+e.id+'" aria-label="Move '+esc(e.name)+' up">&uarr;</button>':'')+
+      (i<day.ex.length-1?'<button class="icon sm" data-act="exmovedown" data-id="'+e.id+'" aria-label="Move '+esc(e.name)+' down">&darr;</button>':'')+
+      '<button class="icon sm" data-act="exedit" data-id="'+e.id+'" aria-label="Edit '+esc(e.name)+'">&#9998;</button>'+
+      '<button class="icon sm" data-act="exremove" data-id="'+e.id+'" aria-label="Remove '+esc(e.name)+'">&times;</button></div>';
+  }).join('');
+  return head+fields+'<h4 class="sh4">Exercises</h4>'+(exRows||'<div class="empty">No exercises yet.</div>')+'<button class="btn ghost full" style="margin-top:8px" data-act="exadd">+ Add exercise</button>';
+}
+function planExHTML(){
+  var s=ui.sheet,plan=VShapeCore.findPlan(S.plans,s.planId),day=plan&&VShapeCore.findPlanDay(plan,s.dayId);
+  if(!plan||!day)return '<div class="sh-h"><h3>Exercise</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div><div class="empty">That day no longer exists.</div>';
+  var head='<div class="sh-h"><button class="icon" data-act="exbacktoday" aria-label="Back">&#8249;</button><h3>'+(s.exId?'Edit exercise':'Add exercise')+'</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div>';
+  if(!s.exId&&!s.custom){
+    var lib=allKnownExercises(),inThisDay=day.ex.map(function(e){return e.id});
+    var opts=Object.keys(lib).filter(function(id){return inThisDay.indexOf(id)<0}).map(function(id){var e=lib[id];
+      return '<button class="frow" data-act="explpick" data-id="'+id+'"><span>'+esc(e.name)+'</span><span class="m">'+esc(e.muscle||'')+' &middot; '+e.sets+' x '+e.lo+'&ndash;'+e.hi+(e.timed?'s':'')+'</span></button>';
+    }).join('');
+    return head+(opts?'<div style="margin-top:4px">'+opts+'</div>':'<div class="empty">No other exercises to reuse yet.</div>')+'<button class="btn full" style="margin-top:12px" data-act="exnewcustom">Create a new exercise</button>';
+  }
+  var ex=s.exId?(day.ex.filter(function(e){return e.id===s.exId})[0]||{}):{};
+  var flags=s.flags||{};
+  return head+
+    '<label class="fld" for="ex-name">Exercise name<input id="ex-name" value="'+esc(ex.name||'')+'"></label>'+
+    '<label class="fld" for="ex-muscle">Muscle group<input id="ex-muscle" value="'+esc(ex.muscle||'')+'"></label>'+
+    '<div class="two"><label class="fld" for="ex-sets">Sets<input id="ex-sets" inputmode="numeric" value="'+(ex.sets!=null?ex.sets:3)+'"></label><label class="fld" for="ex-rest">Rest (sec)<input id="ex-rest" inputmode="numeric" value="'+(ex.rest!=null?ex.rest:90)+'"></label></div>'+
+    '<div class="two"><label class="fld" for="ex-lo">Reps low<input id="ex-lo" inputmode="numeric" value="'+(ex.lo!=null?ex.lo:8)+'"></label><label class="fld" for="ex-hi">Reps high<input id="ex-hi" inputmode="numeric" value="'+(ex.hi!=null?ex.hi:12)+'"></label></div>'+
+    '<div class="two"><label class="fld" for="ex-start">Starting weight (kg)<input id="ex-start" inputmode="decimal" value="'+(ex.start!=null?ex.start:0)+'"></label><label class="fld" for="ex-inc">Weight increment (kg)<input id="ex-inc" inputmode="decimal" value="'+(ex.inc!=null?ex.inc:2)+'"></label></div>'+
+    '<label class="fld" for="ex-cue">Form cue<input id="ex-cue" value="'+esc(ex.cue||'')+'"></label>'+
+    '<div class="row" style="margin-top:10px">'+
+      '<button class="chip'+(flags.bw?' on':'')+'" data-act="extoggle" data-f="bw" aria-pressed="'+!!flags.bw+'">Bodyweight</button>'+
+      '<button class="chip'+(flags.assisted?' on':'')+'" data-act="extoggle" data-f="assisted" aria-pressed="'+!!flags.assisted+'">Assisted</button>'+
+      '<button class="chip'+(flags.timed?' on':'')+'" data-act="extoggle" data-f="timed" aria-pressed="'+!!flags.timed+'">Timed (seconds, not reps)</button>'+
+    '</div>'+
+    '<button class="btn full" style="margin-top:14px" data-act="exsave" data-id="'+(ex.id||'')+'">Save exercise</button>';
 }
 function importHTML(){
   var s=ui.sheet;
@@ -817,6 +1031,96 @@ var A={
     S.profile.baseline=hasAny?{weight:isNaN(w)?null:w,bodyFatPct:isNaN(bf)?null:bf,label:lbl||null}:null;
     saveProfile();render();toast('Baseline saved');
   },
+  /* ---- workout plan builder ---- */
+  plannew:function(){
+    var p=VShapeCore.createPlan(S.plans,'New plan',Date.now());
+    saveLocal();openSheet({type:'plan',planId:p.id});
+  },
+  planedit:function(t){openSheet({type:'plan',planId:t.dataset.id})},
+  plandup:function(t){
+    var p=VShapeCore.duplicatePlan(S.plans,t.dataset.id,null,Date.now());
+    if(!p){toast('Could not duplicate that plan');return}
+    saveLocal();drawSheet();toast('Duplicated as "'+p.name+'"');
+  },
+  plandel:function(t){
+    var r=VShapeCore.deletePlan(S.plans,t.dataset.id,S.activePlanId);
+    if(!r.ok){toast('You need at least one plan');return}
+    if(r.newActivePlanId)S.activePlanId=r.newActivePlanId;
+    saveLocal();drawSheet();render();toast('Plan deleted');
+  },
+  planactivate:function(t){
+    S.activePlanId=t.dataset.id;ui.wd=null;saveLocal();drawSheet();render();toast('Active plan set');
+  },
+  planback:function(){openSheet({type:'settings'})},
+  dayadd:function(t){
+    var plan=VShapeCore.findPlan(S.plans,t.dataset.planid);if(!plan)return;
+    var day=VShapeCore.newPlanDay('New day',Date.now());
+    VShapeCore.addDayToPlan(plan,day);saveLocal();
+    openSheet({type:'planday',planId:plan.id,dayId:day.id});
+  },
+  daysel:function(t){openSheet({type:'planday',planId:ui.sheet.planId,dayId:t.dataset.id})},
+  daymoveup:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId);if(plan&&VShapeCore.moveDayInPlan(plan,t.dataset.id,-1)){saveLocal();drawSheet()}},
+  daymovedown:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId);if(plan&&VShapeCore.moveDayInPlan(plan,t.dataset.id,1)){saveLocal();drawSheet()}},
+  daydel:function(t){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId);if(!plan)return;
+    VShapeCore.removeDayFromPlan(plan,t.dataset.id);saveLocal();drawSheet();toast('Day deleted');
+  },
+  daybacktoplan:function(){openSheet({type:'plan',planId:ui.sheet.planId})},
+  daytogglerest:function(){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    if(!day)return;
+    day.rest=!day.rest;saveLocal();drawSheet();
+  },
+  daywd:function(t){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    if(!day)return;
+    var wd=Number(t.dataset.wd),idx=(day.weekdays||[]).indexOf(wd);
+    if(idx>=0)day.weekdays.splice(idx,1);else(day.weekdays=day.weekdays||[]).push(wd);
+    saveLocal();drawSheet();
+  },
+  daysave:function(){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    if(!day)return;
+    var name=$('#pd-name').value.trim();
+    if(!name){toast('Give the day a name');return}
+    day.name=name;day.tag=$('#pd-tag').value.trim();day.cue=$('#pd-cue').value.trim();
+    saveLocal();drawSheet();toast('Day saved');
+  },
+  exadd:function(){ui.sheet=Object.assign(ui.sheet,{type:'planex',exId:null,custom:false,flags:{}});drawSheet()},
+  exedit:function(t){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    var ex=day&&day.ex.filter(function(e){return e.id===t.dataset.id})[0];if(!ex)return;
+    ui.sheet=Object.assign(ui.sheet,{type:'planex',exId:ex.id,custom:true,flags:{bw:!!ex.bw,assisted:!!ex.assisted,timed:!!ex.timed}});
+    drawSheet();
+  },
+  exmoveup:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);if(day&&VShapeCore.moveExerciseInDay(day,t.dataset.id,-1)){saveLocal();drawSheet()}},
+  exmovedown:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);if(day&&VShapeCore.moveExerciseInDay(day,t.dataset.id,1)){saveLocal();drawSheet()}},
+  exremove:function(t){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    if(day&&VShapeCore.removeExerciseFromDay(day,t.dataset.id)){saveLocal();drawSheet()}
+  },
+  exbacktoday:function(){openSheet({type:'planday',planId:ui.sheet.planId,dayId:ui.sheet.dayId})},
+  exnewcustom:function(){ui.sheet.custom=true;ui.sheet.flags={};drawSheet()},
+  explpick:function(t){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    var lib=allKnownExercises(),src=lib[t.dataset.id];if(!day||!src)return;
+    VShapeCore.addExerciseToDay(day,Object.assign({},src));
+    saveLocal();openSheet({type:'planday',planId:plan.id,dayId:day.id});toast('Added '+src.name);
+  },
+  extoggle:function(t){ui.sheet.flags=ui.sheet.flags||{};var f=t.dataset.f;ui.sheet.flags[f]=!ui.sheet.flags[f];drawSheet()},
+  exsave:function(t){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    if(!day)return;
+    var name=$('#ex-name').value.trim(),sets=parseInt($('#ex-sets').value,10),lo=parseInt($('#ex-lo').value,10),hi=parseInt($('#ex-hi').value,10),rest=parseInt($('#ex-rest').value,10);
+    var start=parseFloat($('#ex-start').value),inc=parseFloat($('#ex-inc').value),muscle=$('#ex-muscle').value.trim(),cue=$('#ex-cue').value.trim();
+    if(!name||!(sets>0)||!(lo>0)||!(hi>=lo)||!(rest>=0)){toast('Check the exercise fields');return}
+    var flags=ui.sheet.flags||{};
+    var exId=t.dataset.id||(uid()+'-ex');
+    var def={id:exId,name:name,sets:sets,lo:lo,hi:hi,rest:rest,inc:isNaN(inc)?0:inc,start:isNaN(start)?0:start,muscle:muscle,cue:cue,bw:!!flags.bw,assisted:!!flags.assisted,timed:!!flags.timed};
+    if(t.dataset.id){VShapeCore.substituteExerciseInDay(day,t.dataset.id,def)}
+    else{VShapeCore.addExerciseToDay(day,def)}
+    saveLocal();openSheet({type:'planday',planId:plan.id,dayId:day.id});toast('Exercise saved');
+  },
   requestworkoutnotif:function(){
     var plugin=wnPlugin();
     if(!plugin){toast('Workout notifications need the Android app');return}
@@ -882,10 +1186,12 @@ var A={
     if(S.active)saveDay(S.active.date);drawTimer();pushNotificationState();
   },
   logset:function(t){
-    var row=t.closest('.set'),exId=row.dataset.ex,i=Number(row.dataset.i),ex=EXLIST[exId];
+    var row=t.closest('.set'),exId=row.dataset.ex,i=Number(row.dataset.i);
     var r=startOrGetSession(ui.date,curWd());
     if(r.blocked){toast('Finish or pause your current workout first');return}
-    var session=r.session,arr=session.log[exId]||[];
+    var session=r.session,ex=(session.exSnapshot||[]).filter(function(e){return e.id===exId})[0];
+    if(!ex){toast('That exercise is no longer in this workout');return}
+    var arr=session.log[exId]||[];
     if(arr[i]){
       VShapeCore.undoSetInSession(session,exId,i);
     }else{
@@ -907,7 +1213,7 @@ var A={
     drawTimer();pushNotificationState();
   },
   exportdata:function(){
-    var out={app:'vshape-tracker',v:2,schema:VShapeCore.SCHEMA_VERSION,exportedAt:new Date().toISOString(),profile:S.profile,days:S.days,photos:S.photos};
+    var out={app:'vshape-tracker',v:3,schema:VShapeCore.SCHEMA_VERSION,exportedAt:new Date().toISOString(),profile:S.profile,days:S.days,photos:S.photos,plans:S.plans,activePlanId:S.activePlanId};
     var blob=new Blob([JSON.stringify(out)],{type:'application/json'}),a=document.createElement('a');
     a.href=URL.createObjectURL(blob);a.download='vshape-backup-'+todayISO()+'.json';
     document.body.appendChild(a);a.click();
@@ -923,14 +1229,18 @@ var A={
       var oldKeys=Object.keys(S.photos),newKeys=Object.keys(newPhotos);
       var toDelete=oldKeys.filter(function(k){return newKeys.indexOf(k)<0});
       return Promise.all(toDelete.map(idbDelP)).then(function(){
-        var out=VShapeCore.migrateBlob({schema:p.schema,profile:p.profile,days:p.days});
+        var out=VShapeCore.migrateBlob({schema:p.schema,profile:p.profile,days:p.days,plans:p.plans,activePlanId:p.activePlanId});
         if(out.locked){toast('That backup is from a newer app version and cannot be restored here.');return}
         S.profile=Object.assign(defProfile(),out.profile||{});
         S.profile.targets=Object.assign(defProfile().targets,S.profile.targets||{});
         if(!S.profile.weights)S.profile.weights={};
         if(!S.profile.customFoods)S.profile.customFoods=[];
         S.days=out.days||{};
-        Object.keys(S.days).forEach(function(d){VShapeCore.quarantineInvalidSets(S.days[d],EXLIST)});
+        var pr=ensurePlans(out.plans,out.activePlanId);
+        S.plans=pr.plans;S.activePlanId=pr.activePlanId;
+        backfillSessionSnapshots();
+        var flat=flatExerciseLookup();
+        Object.keys(S.days).forEach(function(d){VShapeCore.quarantineInvalidSets(S.days[d],flat)});
         S.photos=newPhotos;S.active=null;
         saveLocal();closeSheet();render();toast('Backup restored');
       });
@@ -976,6 +1286,10 @@ document.addEventListener('input',function(e){
 });
 document.addEventListener('change',function(e){
   if(e.target.id==='exsel'){ui.exSel=e.target.value;render()}
+  if(e.target.id==='pl-name'){
+    var plan=VShapeCore.findPlan(S.plans,e.target.dataset.planid),name=e.target.value.trim();
+    if(plan&&name){plan.name=name;saveLocal()}
+  }
 });
 
 /* ---------- Samsung Health import ---------- */

@@ -19,20 +19,32 @@ notification while you train.
 | `tests/` | `node --test` unit tests for `core.js` and startup smoke tests for `app.js` (see below). |
 | `ANDROID.md` | Guide to building and installing the Android app, and the real-device test checklist. |
 
-## Data model (schema 2)
+## Data model (schema 3)
 
 Everything still lives under the single `localStorage` key `vshape-tracker-v1`, now
-tagged `schema: 2`. Each day is `{date, food, steps, stepsSource, water, sessions, quarantine}`.
+tagged `schema: 3`. Each day is `{date, food, steps, stepsSource, water, sessions, quarantine}`.
 A **session** (not the calendar day) is the unit of a workout: `{id, day, status
-('active'|'paused'|'finished'), startedAt, finishedAt, pausedMs, log, rest}`. A date can
-hold more than one session, so doing two program days (or re-logging the same exercise,
-which several program days share) on the same date no longer overwrites either one.
+('active'|'paused'|'finished'), startedAt, finishedAt, pausedMs, log, rest, planId, dayId,
+dayName, dayTag, dayCue, exSnapshot}`. A date can hold more than one session, so doing two
+program days (or re-logging the same exercise, which several program days share) on the
+same date no longer overwrites either one.
 
-On first load of old (pre-session) data, each day's existing log becomes one `finished`
-session with no invented start time, the previous raw blob is kept under a
+**Workout plans** (`plans`, `activePlanId`): the program is no longer hardcoded. A plan is
+`{id, name, days:[{id, name, tag, cue, rest, weekdays, ex:[...]}]}`; `ex` entries are the
+same shape the app always used (sets/rep range/rest/increment/muscle/cue/bw/assisted/timed).
+Only one plan is active at a time and drives what "today's workout" is, via each day's
+`weekdays` (0=Sun..6=Sat). Every session snapshots its day's `ex` array into `exSnapshot`
+(plus `dayName`/`dayTag`/`dayCue`) at the moment it is created, so editing or deleting a
+plan later never changes how an already-started or already-finished session is displayed,
+counted, or rolled into the weekly volume-by-muscle analytics.
+
+On first load of old (pre-session, or pre-plan) data: each day's existing log becomes one
+`finished` session with no invented start time; the previous raw blob is kept under a
 `vshape-tracker-v1-pre-migration-backup-<timestamp>` key (and, best-effort, in IndexedDB)
-before anything is overwritten, and data tagged with a newer schema than this build knows
-is left completely untouched and the app shows a "locked" screen instead of guessing.
+before anything is overwritten; data with no plans yet is given one seeded from the
+original built-in 5-day split (and existing sessions get an `exSnapshot` backfilled from
+it); and data tagged with a newer schema than this build knows is left completely
+untouched, showing a "locked" screen instead of guessing.
 
 ## Run in the browser
 
@@ -63,11 +75,15 @@ real browser test tool (e.g. Playwright) against `npm run serve`.
 - **Today:** greeting and streak, 7-day goal strip, calorie/protein/steps rings,
   carbs and fat, steps entry or sync, activity tiles, water tracker, today's workout, weigh-in.
 - **Food:** meal templates, food library, custom foods, copy yesterday.
-- **Train:** 5-day program with load and rep suggestions from your history, explicit
-  Start/Pause/Resume/Finish workout controls, a durable deadline-based rest timer,
-  PR badge when you beat your previous best set.
+- **Train:** load and rep suggestions from your history, explicit Start/Pause/Resume/Finish
+  workout controls, a durable deadline-based rest timer, PR badge when you beat your
+  previous best set. The default is a 5-day split, but it's a fully custom plan under
+  Settings > Workout plans: create/duplicate/delete plans, add training or rest days,
+  assign them to weekdays, and add/remove/reorder/substitute exercises with your own
+  sets, rep ranges, rest and weight increments.
 - **Progress:** weekly check-in with calorie adjustment advice, weight and strength charts,
-  14-day steps and calories, progress photos, an optional editable baseline measurement.
+  a training-volume-by-muscle-group card for the last 7 days, 14-day steps and calories,
+  progress photos, an optional editable baseline measurement.
 - In the Android app, an active workout shows a persistent notification (elapsed time,
   current exercise, sets done, rest countdown, Pause/Resume and Skip Rest) — see
   "Workout notification" in `ANDROID.md`.

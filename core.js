@@ -7,7 +7,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var SCHEMA_VERSION = 2;
+  var SCHEMA_VERSION = 3;
 
   /* ---------- small helpers ---------- */
   function isFiniteNumber(n) { return typeof n === 'number' && isFinite(n); }
@@ -62,14 +62,24 @@
   }
 
   /* ---------- sessions ---------- */
-  function newSession(day, now, label) {
+  function newSession(day, now, label, extra) {
     now = isFiniteNumber(now) ? now : Date.now();
-    return {
+    var s = {
       id: genId(now), day: day || null, label: label || null,
       startedAt: now, finishedAt: null, status: 'active',
       pausedAt: null, pausedMs: 0, lastAppliedSeq: 0,
-      log: {}, rest: null
+      log: {}, rest: null,
+      planId: null, dayId: null, dayName: null, dayTag: null, dayCue: null, exSnapshot: []
     };
+    if (extra && typeof extra === 'object') {
+      if (extra.planId !== undefined) s.planId = extra.planId;
+      if (extra.dayId !== undefined) s.dayId = extra.dayId;
+      if (extra.dayName !== undefined) s.dayName = extra.dayName;
+      if (extra.dayTag !== undefined) s.dayTag = extra.dayTag;
+      if (extra.dayCue !== undefined) s.dayCue = extra.dayCue;
+      if (extra.exSnapshot !== undefined) s.exSnapshot = extra.exSnapshot;
+    }
+    return s;
   }
 
   function findOpenSession(day) {
@@ -160,6 +170,122 @@
       (log[e.id] || []).forEach(function (s) { if (s) { done++; if (!e.timed && s.w > 0) vol += s.w * s.r; } });
     });
     return { done: done, total: total, vol: vol };
+  }
+
+  /* ---------- workout plans (custom plan builder) ---------- */
+  // A Plan is {id, name, days:[DayDef]}. A DayDef is
+  // {id, name, tag, cue, rest:boolean, weekdays:[0..6], ex:[ExDef]} where ExDef
+  // is the same shape the app already used for program-day exercises
+  // (id,name,sets,lo,hi,rest,inc,start,muscle,cue,bw,assisted,timed). Sessions
+  // snapshot a day's ex array at creation time (newSession's exSnapshot), so
+  // editing or deleting a plan later never changes how an already-started or
+  // already-finished session is displayed or counted.
+  function newPlan(name, now) { return { id: genId(now), name: name || 'New plan', days: [] }; }
+  function newPlanDay(name, now) { return { id: genId(now) + '-d', name: name || 'New day', tag: '', cue: '', rest: false, weekdays: [], ex: [] }; }
+  function findPlan(plans, id) { return (plans || []).filter(function (p) { return p.id === id; })[0] || null; }
+  function findPlanDay(plan, dayId) { return ((plan && plan.days) || []).filter(function (d) { return d.id === dayId; })[0] || null; }
+  function planDayForWeekday(plan, weekday) {
+    var days = (plan && plan.days) || [];
+    for (var i = 0; i < days.length; i++) {
+      if (!days[i].rest && (days[i].weekdays || []).indexOf(weekday) >= 0) return days[i];
+    }
+    return null;
+  }
+  function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
+
+  function createPlan(plans, name, now) {
+    var p = newPlan(name, now);
+    plans.push(p);
+    return p;
+  }
+  // Duplicating a plan keeps every exercise id unchanged (so progression
+  // history and PR tracking for "the same real exercise" keep working across
+  // the copy), but gives the plan itself and every day inside it a fresh id,
+  // so editing the copy can never alter the original.
+  function duplicatePlan(plans, planId, newName, now) {
+    var src = findPlan(plans, planId);
+    if (!src) return null;
+    var copy = deepClone(src);
+    copy.id = genId(now) + '-dup';
+    copy.name = newName || (src.name + ' (copy)');
+    copy.days.forEach(function (d) { d.id = genId(now) + '-d-' + Math.random().toString(36).slice(2, 6); });
+    plans.push(copy);
+    return copy;
+  }
+  // Refuses to delete the last remaining plan (the app always needs at least
+  // one plan to drive the Train tab). If the deleted plan was active, the
+  // caller should switch activePlanId to newActivePlanId.
+  function deletePlan(plans, planId, activePlanId) {
+    if (!plans || plans.length <= 1) return { ok: false, reason: 'last-plan' };
+    var idx = plans.findIndex(function (p) { return p.id === planId; });
+    if (idx < 0) return { ok: false, reason: 'not-found' };
+    plans.splice(idx, 1);
+    if (activePlanId === planId) return { ok: true, removed: true, newActivePlanId: plans[0].id };
+    return { ok: true, removed: true };
+  }
+  function addDayToPlan(plan, dayDef) { plan.days.push(dayDef); return dayDef; }
+  function removeDayFromPlan(plan, dayId) {
+    var idx = plan.days.findIndex(function (d) { return d.id === dayId; });
+    if (idx < 0) return false;
+    plan.days.splice(idx, 1);
+    return true;
+  }
+  function moveDayInPlan(plan, dayId, delta) {
+    var idx = plan.days.findIndex(function (d) { return d.id === dayId; });
+    if (idx < 0) return false;
+    var to = idx + delta;
+    if (to < 0 || to >= plan.days.length) return false;
+    var tmp = plan.days[idx]; plan.days[idx] = plan.days[to]; plan.days[to] = tmp;
+    return true;
+  }
+  function addExerciseToDay(day, exDef, index) {
+    if (!exDef.id) exDef.id = genId(Date.now()) + '-ex';
+    if (index == null || index > day.ex.length) day.ex.push(exDef);
+    else day.ex.splice(index, 0, exDef);
+    return exDef;
+  }
+  function removeExerciseFromDay(day, exId) {
+    var idx = day.ex.findIndex(function (e) { return e.id === exId; });
+    if (idx < 0) return false;
+    day.ex.splice(idx, 1);
+    return true;
+  }
+  function moveExerciseInDay(day, exId, delta) {
+    var idx = day.ex.findIndex(function (e) { return e.id === exId; });
+    if (idx < 0) return false;
+    var to = idx + delta;
+    if (to < 0 || to >= day.ex.length) return false;
+    var tmp = day.ex[idx]; day.ex[idx] = day.ex[to]; day.ex[to] = tmp;
+    return true;
+  }
+  function substituteExerciseInDay(day, exId, newExDef) {
+    var idx = day.ex.findIndex(function (e) { return e.id === exId; });
+    if (idx < 0) return false;
+    day.ex[idx] = newExDef;
+    return true;
+  }
+
+  // Sums logged-set volume (kg, excluding timed/bodyweight-only sets, same
+  // convention as sessionSetsDone) grouped by muscle group, using each
+  // session's own exSnapshot rather than any live plan - this is what keeps
+  // the analytics correct even after the plan that produced them is edited
+  // or deleted.
+  function weeklyVolumeByMuscle(sessions) {
+    var out = {};
+    (sessions || []).forEach(function (session) {
+      var exMap = {};
+      (session.exSnapshot || []).forEach(function (e) { exMap[e.id] = e; });
+      Object.keys((session && session.log) || {}).forEach(function (exId) {
+        var ex = exMap[exId];
+        if (!ex || ex.timed) return;
+        (session.log[exId] || []).forEach(function (s) {
+          if (!s || !(s.w > 0)) return;
+          var m = ex.muscle || 'Other';
+          out[m] = (out[m] || 0) + s.w * s.r;
+        });
+      });
+    });
+    return out;
   }
 
   /* ---------- rest timer (durable deadline, stored on the session) ---------- */
@@ -256,10 +382,16 @@
   /* ---------- migration (v1 -> schema 2) ---------- */
   function migrateBlob(raw) {
     if (raw && raw.schema === SCHEMA_VERSION) {
-      return { schema: SCHEMA_VERSION, profile: raw.profile || {}, days: raw.days || {}, migrated: false };
+      return { schema: SCHEMA_VERSION, profile: raw.profile || {}, days: raw.days || {}, plans: raw.plans || null, activePlanId: raw.activePlanId || null, migrated: false };
     }
     if (raw && raw.schema && raw.schema > SCHEMA_VERSION) {
       return { locked: true, reason: 'newer-schema', schemaFound: raw.schema };
+    }
+    if (raw && raw.schema === 2) {
+      // Already session-shaped (days[*].sessions); the only thing schema 3
+      // adds is the plans concept, which simply did not exist yet. Nothing
+      // about days/sessions themselves needs to change.
+      return { schema: SCHEMA_VERSION, profile: raw.profile || {}, days: raw.days || {}, plans: null, activePlanId: null, migrated: true };
     }
     var days = {}, profile = (raw && raw.profile) || {};
     Object.keys((raw && raw.days) || {}).forEach(function (date) {
@@ -284,15 +416,21 @@
         quarantine: { sets: [], food: [] }
       };
     });
-    return { schema: SCHEMA_VERSION, profile: profile, days: days, migrated: true };
+    return { schema: SCHEMA_VERSION, profile: profile, days: days, plans: null, activePlanId: null, migrated: true };
   }
 
   function quarantineInvalidSets(day, exlist) {
     if (!day || !day.sessions) return;
     if (!day.quarantine) day.quarantine = { sets: [], food: [] };
     day.sessions.forEach(function (session) {
+      var snapshotMap = null;
+      if (session.exSnapshot && session.exSnapshot.length) {
+        snapshotMap = {};
+        session.exSnapshot.forEach(function (e) { snapshotMap[e.id] = e; });
+      }
+      var lookup = snapshotMap || exlist;
       Object.keys(session.log || {}).forEach(function (exId) {
-        var ex = exlist[exId], arr = session.log[exId];
+        var ex = lookup[exId], arr = session.log[exId];
         if (!arr) return;
         arr.forEach(function (s, i) {
           if (!s) return;
@@ -409,6 +547,11 @@
     logSetIntoSession: logSetIntoSession, undoSetInSession: undoSetInSession, sessionSetsDone: sessionSetsDone,
     startRest: startRest, pauseRest: pauseRest, resumeRest: resumeRest, skipRest: skipRest, restRemainingMs: restRemainingMs,
     reconcileActions: reconcileActions, shouldShowNotification: shouldShowNotification,
+    newPlan: newPlan, newPlanDay: newPlanDay, findPlan: findPlan, findPlanDay: findPlanDay,
+    planDayForWeekday: planDayForWeekday, createPlan: createPlan, duplicatePlan: duplicatePlan, deletePlan: deletePlan,
+    addDayToPlan: addDayToPlan, removeDayFromPlan: removeDayFromPlan, moveDayInPlan: moveDayInPlan,
+    addExerciseToDay: addExerciseToDay, removeExerciseFromDay: removeExerciseFromDay, moveExerciseInDay: moveExerciseInDay,
+    substituteExerciseInDay: substituteExerciseInDay, weeklyVolumeByMuscle: weeklyVolumeByMuscle,
     suggestProgression: suggestProgression, isPR: isPR, e1rm: e1rm,
     migrateBlob: migrateBlob, quarantineInvalidSets: quarantineInvalidSets,
     parseBackupJSON: parseBackupJSON,
