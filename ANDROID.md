@@ -134,6 +134,146 @@ a second concurrent one, as before.
   has not been exercised — this app is a debug/sideloaded build only, so it hasn't gone through
   that review.
 
+## Smart workout notification (Phase 2B.2 → 2B.3: true background logging)
+
+**Phase 2B.2's limitation (now fixed): Log Set while backgrounded used to only *enqueue* the
+action and wait for the WebView to next run before anything was actually recorded.** Phase 2B.3
+replaces that for the actions that matter for background logging. `WorkoutActionReceiver` now
+validates and durably commits Log Set, Skip Rest, Pause/Resume Rest and Finish **itself**, natively,
+synchronously, with no WebView involvement:
+- `ActionQueue.commitLogSet`/`commitSimple` write with `SharedPreferences.Editor.commit()`
+  (synchronous, verified) rather than `apply()` (async, fire-and-forget) specifically because a
+  BroadcastReceiver's process can be killed moments after `onReceive()` returns - the boolean
+  result is checked before the notification is allowed to claim anything succeeded.
+- `WorkoutLogic.java` (a small, pure, deliberately-duplicated port of core.js's
+  `validateSet`/`pendingSetsList`/`sessionSetsDone` - see its class comment) lets the receiver
+  decide, from data alone (the frozen `exSnapshot` + whatever is already logged), whether a tap is
+  valid and what the next pending set is, without needing history or progression logic (that stays
+  JS-only: `pushNotificationState()` now also sends a full per-exercise suggested-reps lookahead
+  table - every exercise with pending sets, not just the current one - see `app.js`).
+- A native "commits since the last JS sync" cache (`ActionQueue`'s `nativeCommits`) is what the
+  notification's projection is actually computed from while backgrounded; `saveLastState` prunes it
+  against every fresh push from JS, which is what stops a native commit that has since actually
+  been reconciled (or an in-app change, e.g. an undo) from silently diverging from the truth.
+- `core.js`'s `reconcileActions` is still the **only** thing that ever writes to
+  `session.log`/`localStorage` - it re-validates every native-approved action from scratch using
+  the session's own `exSnapshot` (defense in depth, not trust), and nothing is ever deleted from
+  the durable queue before that reconciliation's resulting save has actually succeeded (unchanged
+  from 2A.1/2B.2 - see the storage-failure tests).
+- A real rest countdown starts immediately (native-tracked deadline, independent of `session.rest`
+  until JS catches up) and a `Handler`-based timer proactively advances the notification to the
+  next pending set the moment it expires, with no user interaction and no WebView involvement.
+
+**What remains queue-and-wait (not instant):** Pause/Resume of the **whole workout** still only
+enqueues and shows "…Updating…" until core.js reconciles it, because only core.js tracks
+`session.pausedMs` (the elapsed-time bookkeeping) - replicating that natively was judged not worth
+the added duplication for a less time-critical action. A weight **adjustment** (before Log Set is
+tapped) was already, and remains, purely local/native - it never touches the durable queue at all,
+by design, since an adjustment that's never committed has nothing for core.js to know about.
+
+**Honest, remaining limits on "true background logging":**
+- The proactive rest-expiry `Handler` only survives as long as this `Service` instance does.
+  Android does not impose Doze/background-execution limits on an *active* foreground service's own
+  callbacks, but some OEMs (Samsung included) are known to aggressively kill foreground services
+  under battery-saver modes regardless of what the platform API guarantees - **not verified on a
+  real device.** If the callback never fires, the notification's own defensive deadline check
+  still corrects the display the next time anything rebuilds it (another tap, or the app
+  reopening) - just not proactively, i.e. the countdown could sit at "0:00" a little longer than it
+  should before flipping to the next set.
+- If the foreground service's process is killed entirely (not just the Handler failing) between a
+  native commit and the next notification rebuild, the committed set itself is still safe (it was
+  already durably written via `commit()`) - but the notification will not show the advanced state
+  again until something restarts the service (JS pushing fresh state, or another action tap).
+- Reps are still not adjustable from the notification (see below) - this is unchanged from 2B.2.
+
+The notification is a quick-logging controller, not just a readout. See `core.test.js` for the
+logset-specific idempotency/validation tests (duplicate taps on an already-logged set, a
+wrong-session or stale action, an exercise not in the session's own snapshot, and an invalid
+weight/reps all get rejected without corrupting the log) and `WorkoutLogicTest.java` (a plain JUnit
+test, run via `./gradlew testDebugUnitTest`) for the native-side mirror of that same logic.
+
+**Deliberate design choice - no custom `RemoteViews` layout:** a plain `NotificationCompat`
+notification (used throughout this app) only reliably supports about 3 action buttons, and there
+is no simple way to fit "Log Set" + increase/decrease weight + adjust reps + Pause + Skip all at
+once without a custom expanded layout. This phase intentionally does **not** add one: a custom
+`RemoteViews` layout's colors are not guaranteed to match the system's light/dark notification
+theme the way `NotificationCompat`'s own text views are (a well-known, easy-to-get-wrong pitfall -
+invisible text on some OEM theme combinations), and that is exactly the kind of per-device
+rendering risk this environment has no way to verify without a real phone. Instead, each
+notification state shows the 2-3 actions that matter most for it, and anything else is one tap
+away via the notification's own content-tap (opens the app):
+- **ready** (a set is pending): `-{increment}`, `Log set`, `+{increment}` - weight-only quick
+  adjust, using the exercise's own configured increment; reps are not adjustable from the
+  notification in this version (3-button budget; adjusting reps still works fine inside the app).
+  The adjustment itself is purely local/native (SharedPreferences `pendingAdjust`, never the
+  durable action queue) until "Log set" is tapped, so an adjustment that's never committed can
+  never desync from or corrupt the session - the worst case is it silently resets to the suggested
+  load next time, never a wrong value actually recorded.
+- **resting** / **rest_paused**: `Skip rest`, `Pause rest`/`Resume rest`, `Pause workout`.
+- **exercise_complete** (every set logged): `Finish workout`, `Pause workout`.
+- **workout_paused**: `Resume workout`.
+
+**Known limitations, not verified on a device:**
+- The exact button layout/spacing above is standard Android notification actions, which Samsung's
+  One UI is known to sometimes order or collapse differently from Pixel's (same caveat as 2A/2A.1's
+  Pause/Skip rest buttons already had) - not confirmed on a Samsung device.
+- Rep adjustment and simultaneous weight-decrease-and-increase in one glance are not available
+  from the notification at all (only from inside the app) - a direct consequence of the 3-button
+  ceiling, not an oversight.
+- The weight-adjustment buttons' tap-to-redraw latency (native-only, no WebView round-trip) has
+  not been measured on a real device; it should be near-instant since it never waits on the
+  WebView, but "near-instant" has not been timed.
+- Lock-screen visibility of the new action buttons (and whether Android trims any of them on the
+  lock screen specifically, which is a known OS behavior for notifications with many actions) has
+  not been checked.
+- **Pre-existing, not introduced this phase:** Android's `Chronometer` in countdown mode has no
+  built-in "stop at zero" behavior - once `restDeadlineEpochMs` passes, it keeps counting into
+  negative numbers unless the notification is rebuilt with a different mode. The in-app rest
+  widget already clamps this correctly (`restRemainingMs` never goes negative), but the
+  *notification's own* Chronometer relies on `pushNotificationState()` being called again once
+  rest actually ends to switch it out of countdown mode - which happens, but only after up to a
+  ~7-second grace window (the same "Go" window the in-app timer already shows) during which the
+  native countdown could plausibly be seen ticking slightly past zero. Not confirmed on a device.
+
+## Phase 2B.4 hotfix: the rest countdown was missing from the notification entirely
+
+Real-device testing found the rest countdown worked in-app but never appeared in the
+notification. Root cause: `WorkoutForegroundService.onStartCommand`'s `ACTION_SHOW` handling
+(every fresh push from JS, i.e. every normal `render()`) **unconditionally cleared**
+`nativeRest` instead of establishing it from what JS actually sent. `buildActiveNotification()`
+decides "is resting" purely from `nativeRest` - never from the pushed payload's own
+`restActive`/`restDeadlineEpochMs`/`restPaused` fields - so a rest started from the **in-app**
+UI (as opposed to a Log Set tap *on the notification itself*, which is the only thing that ever
+populated `nativeRest`) was invisible to the notification 100% of the time.
+
+**Fixed:** `syncNativeRestFromJsState` now establishes (or correctly clears) `nativeRest` from
+the pushed state every time, via a new pure, unit-tested helper (`WorkoutLogic.syncRestFromState`
+- see `WorkoutLogicTest.java`). This also means the native Pause/Resume/Skip rest button
+handlers (which only ever read `nativeRest`) now work correctly for an app-started rest too,
+and the proactive rest-expiry `Handler` (`scheduleRestExpiryIfNeeded`) now fires for those as
+well, not only for notification-started rests.
+
+**Wall-clock vs. elapsed-realtime:** both JS (`Date.now()`) and this native code
+(`System.currentTimeMillis()`) already use the same wall-clock epoch-millisecond basis
+throughout, including the fixed `nativeRest.deadline` value - no conversion was needed there.
+The one place a *different* clock genuinely matters is Android's own `Chronometer` widget:
+`setUsesChronometer(true)` with a wall-clock `setWhen()` relies on Android's documented internal
+conversion (`base = when + (elapsedRealtime() - currentTimeMillis())`, recomputed every time the
+notification is rebuilt) to turn that wall-clock value into its internal elapsed-realtime-based
+stopwatch base. That conversion is standard `NotificationCompat`/`Notification` behavior, not
+something this app implements itself, and was already being relied on correctly before this fix
+- the missing piece was only ever getting `nativeRest` populated in the first place.
+
+**Genuine Samsung One UI limitations (still not verified on a device):** One UI has been
+reported (elsewhere, not confirmed by this project) to be more aggressive than stock Android
+about trimming background work for apps under its "Put unused apps to sleep"/battery-saver
+modes, which could still kill this foreground service's process between notification rebuilds
+even with the above fix - in that case the countdown would only catch up the next time
+anything rebuilds the notification (another tap, or the JS side pushing a fresh state), not
+proactively. One UI is also known to sometimes order/collapse notification action buttons
+differently from Pixel's (the same caveat 2A/2A.1/2B.3 already noted for the other action
+buttons). Neither of these has been exercised on a real Samsung device by this project.
+
 ## Real-device checklist
 
 Nothing below has been run on an actual phone from this change — only read through carefully and
@@ -173,6 +313,65 @@ trusting it:
       share sheet / download manager fallback already in the app — confirm it still produces a
       usable file on your device.
 - [ ] The minus key on the on-screen keyboard for assisted pull-up weight entry.
+
+### Phase 2B.2 - smart notification quick-logging
+- [ ] Start a workout; the notification shows the exercise, set number, and suggested weight/reps.
+- [ ] Tap `+{increment}`/`-{increment}` on the notification a few times; the displayed weight
+      updates immediately (no "Updating…" - this is a local redraw, not a queued action) and never
+      goes below whatever `validateSet` would reject once logged.
+- [ ] Tap `Log set`: confirm the exact weight shown (including after an adjustment) is what ends
+      up recorded in the app, not the original suggestion; the notification then switches to the
+      rest countdown automatically.
+- [ ] Rapidly double-tap `Log set` (or tap it, then tap it again before the "Updating…" clears):
+      confirm only one set gets logged, not two, and the app never shows a duplicated/corrupted set.
+- [ ] While resting, tap `Pause rest` then `Resume rest` from the notification: confirm the
+      countdown actually pauses/resumes (not just the button label) and matches the in-app timer.
+- [ ] Log every planned set of an exercise; confirm the notification moves on to the next exercise
+      automatically (no action needed) with a fresh suggested weight/reps for it.
+- [ ] Log every set of the whole workout; confirm the notification shows "Finish workout" and
+      tapping it actually finishes the session (check Progress/history afterwards).
+- [ ] With the workout notification showing, edit the *same* workout's exercises from Settings >
+      Workout plans while the workout stays open in another tab; confirm the notification and the
+      in-progress session keep showing what was true when the workout started, not the edit.
+- [ ] Kill the app process with a pending (not yet logged) set adjusted but not yet tapped "Log
+      set"; reopen the app - confirm nothing was silently recorded, and the notification's
+      adjustment either carries over cleanly or safely resets to the suggestion (never a wrong
+      committed value).
+
+### Phase 2B.3 - true background logging (the critical scenario)
+- [ ] Start a workout, then lock the phone (screen off) or switch to another app entirely -
+      do not reopen VShape for the rest of this checklist until told to.
+- [ ] From the locked screen or the notification shade, tap `-`/`+` to adjust weight, then
+      `Log set`. Confirm the notification immediately shows "Rest" with a real counting-down
+      timer - no "Updating…" lingering, no delay waiting for anything.
+- [ ] Wait for rest to finish without touching the phone. Confirm the notification automatically
+      switches to the next pending set (or the next exercise, if that was the last set of the
+      current one) with its own fresh suggested weight/reps, with no interaction at all.
+- [ ] Repeat Log Set -> rest -> auto-advance for several more sets, still without opening the app,
+      including at least one exercise boundary and the very last set of the whole workout
+      (confirm "Finish workout" appears and tapping it actually ends the session instantly, not
+      "Updating…").
+- [ ] Only now reopen VShape. Confirm every set logged while backgrounded is present, in order,
+      with the exact weights/reps that were shown on the notification at the time - not the
+      original suggestions if they were adjusted.
+- [ ] Repeat the above but kill the app process (not just background it) immediately after a
+      Log Set tap, before reopening. Confirm that set survived (it's in the log once reopened)
+      and nothing is duplicated.
+- [ ] Repeat again, but this time force-stop background data/enable aggressive battery
+      optimization for VShape (Samsung One UI's "Put unused apps to sleep" / "Deep sleeping apps")
+      before locking the screen, then log a set and wait for rest to expire without touching the
+      phone. This is the scenario most likely to break the proactive auto-advance (see the
+      Handler/foreground-service caveat above) - confirm whether it still works, and if not,
+      confirm the notification still self-corrects the next time it's tapped or the app reopens
+      (it should never show a stale/finished countdown as still running indefinitely).
+- [ ] While backgrounded with a rest countdown running, tap `Pause rest`, wait several seconds,
+      then tap `Resume rest`: confirm the remaining time is preserved correctly (not reset, not
+      continuing to tick while "paused").
+- [ ] Double-tap `Log set` as fast as possible (or tap it twice in quick succession before any
+      visual change): confirm exactly one set is recorded.
+- [ ] Samsung-specific: confirm the notification's 3 action buttons render and remain tappable
+      from the lock screen exactly as they do from the unlocked notification shade, and that One
+      UI does not reorder/collapse them unpredictably between the two.
 
 ## After editing the web files
 Run `npm run android` again (or `npm run build && npx cap sync android`) and re-run from Android Studio.

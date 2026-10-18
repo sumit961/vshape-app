@@ -37,6 +37,11 @@ dependencies {
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"
+    // Plain local unit tests run against Android's STUB org.json classes, which throw at
+    // runtime ("Stub!") - this is the standard, documented workaround (a real, dependency-free
+    // reference implementation of the same org.json API) for testing org.json-based code
+    // without pulling in Robolectric. Test-scope only; never shipped in the app itself.
+    testImplementation 'org.json:json:20231013'
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')

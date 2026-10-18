@@ -229,6 +229,24 @@ test('reconcileActions skips every action once the session is finished', () => {
   assert.equal(r.applied.length, 0);
   assert.equal(r.skipped[0].reason, 'session-finished');
 });
+test('reconcileActions applies pause-rest/resume-rest (e.g. a "Pause rest"/"Resume rest" notification tap, not the workout pause)', () => {
+  const s = C.newSession('push', 0);
+  C.startRest(s, { id: 'a', name: 'A', rest: 60 }, 0);
+  const r1 = C.reconcileActions(s, [{ seq: 1, type: 'pause-rest', ts: 1000 }], 2000);
+  assert.equal(r1.applied.length, 1);
+  assert.equal(s.rest.paused, true);
+  assert.equal(s.status, 'active'); // the workout itself is untouched
+  const r2 = C.reconcileActions(s, [{ seq: 2, type: 'resume-rest', ts: 3000 }], 4000);
+  assert.equal(r2.applied.length, 1);
+  assert.equal(s.rest.paused, false);
+});
+test('reconcileActions applies a finish action, durably ending the session (e.g. a "Finish workout" notification tap)', () => {
+  const s = C.newSession('push', 0);
+  const r = C.reconcileActions(s, [{ seq: 1, type: 'finish', ts: 500 }], 1000);
+  assert.equal(r.applied.length, 1);
+  assert.equal(s.status, 'finished');
+  assert.equal(s.finishedAt, 500);
+});
 test('reconcileActions with no session skips everything without throwing', () => {
   const r = C.reconcileActions(null, [{ seq: 1, type: 'pause' }], 10);
   assert.equal(r.applied.length, 0);
@@ -254,6 +272,87 @@ test('shouldShowNotification is true only for active/paused sessions', () => {
   assert.equal(C.shouldShowNotification(s), true);
   C.finishSession(s, 10);
   assert.equal(C.shouldShowNotification(s), false);
+});
+
+/* ---------- smart notification: state machine + logset reconciliation ---------- */
+const PROGRAM_DAY = { ex: [{ id: 'a', name: 'A', sets: 1, lo: 8, hi: 12, rest: 60, inc: 2, start: 10, muscle: 'Chest' }, { id: 'b', name: 'B', sets: 1, lo: 8, hi: 12, rest: 60, inc: 2, start: 10, muscle: 'Back' }] };
+test('notificationState walks ready -> resting -> ready -> exercise_complete, and paused/finished override everything', () => {
+  const s = C.newSession('d1', 0, null, { exSnapshot: PROGRAM_DAY.ex });
+  assert.equal(C.notificationState(s, PROGRAM_DAY), 'ready');
+  C.logSetIntoSession(s, PROGRAM_DAY.ex[0], 0, { w: 10, r: 10 });
+  C.startRest(s, PROGRAM_DAY.ex[0], 0);
+  assert.equal(C.notificationState(s, PROGRAM_DAY), 'resting');
+  C.pauseRest(s, 100);
+  assert.equal(C.notificationState(s, PROGRAM_DAY), 'rest_paused');
+  C.skipRest(s);
+  assert.equal(C.notificationState(s, PROGRAM_DAY), 'ready'); // one set left (exercise B)
+  C.logSetIntoSession(s, PROGRAM_DAY.ex[1], 0, { w: 10, r: 10 });
+  assert.equal(C.notificationState(s, PROGRAM_DAY), 'exercise_complete');
+  C.pauseSession(s, 200);
+  assert.equal(C.notificationState(s, PROGRAM_DAY), 'workout_paused'); // pause overrides exercise_complete
+  C.resumeSession(s, 300);
+  C.finishSession(s, 400);
+  assert.equal(C.notificationState(s, PROGRAM_DAY), 'workout_finished');
+});
+test('notificationState treats no session as workout_finished (nothing to show/control)', () => {
+  assert.equal(C.notificationState(null, PROGRAM_DAY), 'workout_finished');
+});
+test('nextPendingSet walks exercises and sets in program order and returns null once everything is logged', () => {
+  const s = C.newSession('d1', 0, null, { exSnapshot: PROGRAM_DAY.ex });
+  assert.deepEqual(C.nextPendingSet(s, PROGRAM_DAY), { exIndex: 0, exId: 'a', setIndex: 0 });
+  C.logSetIntoSession(s, PROGRAM_DAY.ex[0], 0, { w: 10, r: 10 });
+  assert.deepEqual(C.nextPendingSet(s, PROGRAM_DAY), { exIndex: 1, exId: 'b', setIndex: 0 });
+  C.logSetIntoSession(s, PROGRAM_DAY.ex[1], 0, { w: 10, r: 10 });
+  assert.equal(C.nextPendingSet(s, PROGRAM_DAY), null);
+});
+test('pendingSetsList returns every remaining set in program order, letting a caller walk the whole rest of the workout from just the exSnapshot and what is logged so far', () => {
+  const twoSetDay = { ex: [{ id: 'a', name: 'A', sets: 2, lo: 8, hi: 12, rest: 60, inc: 2, start: 10 }] };
+  const s = C.newSession('d1', 0, null, { exSnapshot: twoSetDay.ex });
+  assert.deepEqual(C.pendingSetsList(s, twoSetDay), [
+    { exIndex: 0, exId: 'a', setIndex: 0 },
+    { exIndex: 0, exId: 'a', setIndex: 1 },
+  ]);
+  C.logSetIntoSession(s, twoSetDay.ex[0], 0, { w: 10, r: 10 });
+  assert.deepEqual(C.pendingSetsList(s, twoSetDay), [{ exIndex: 0, exId: 'a', setIndex: 1 }]);
+  C.logSetIntoSession(s, twoSetDay.ex[0], 1, { w: 10, r: 10 });
+  assert.deepEqual(C.pendingSetsList(s, twoSetDay), []);
+});
+test('reconcileActions applies a logset action exactly once and starts the matching rest timer in the same step', () => {
+  const s = C.newSession('d1', 0, null, { exSnapshot: PROGRAM_DAY.ex });
+  const r = C.reconcileActions(s, [{ seq: 1, type: 'logset', exId: 'a', index: 0, w: 22.5, r: 9, ts: 100 }], 200);
+  assert.equal(r.applied.length, 1);
+  assert.deepEqual(s.log.a[0], { w: 22.5, r: 9 });
+  assert.ok(s.rest, 'expected the rest timer to start in the same reconciled step as the log');
+  assert.equal(s.rest.exId, 'a');
+});
+test('reconcileActions skips a logset for a set index that is already logged, even from a distinct (non-stale) action - the duplicated/delayed tap case', () => {
+  const s = C.newSession('d1', 0, null, { exSnapshot: PROGRAM_DAY.ex });
+  C.reconcileActions(s, [{ seq: 1, type: 'logset', exId: 'a', index: 0, w: 20, r: 8, ts: 0 }], 10);
+  const r = C.reconcileActions(s, [{ seq: 2, type: 'logset', exId: 'a', index: 0, w: 99, r: 99, ts: 20 }], 30);
+  assert.equal(r.applied.length, 0);
+  assert.equal(r.skipped[0].reason, 'set-already-logged');
+  assert.deepEqual(s.log.a[0], { w: 20, r: 8 }); // the second (different seq, "duplicated tap") action never overwrites it
+});
+test('reconcileActions rejects a logset for an exercise not in the session\'s own snapshot (wrong/stale workout)', () => {
+  const s = C.newSession('d1', 0, null, { exSnapshot: PROGRAM_DAY.ex });
+  const r = C.reconcileActions(s, [{ seq: 1, type: 'logset', exId: 'not-in-this-workout', index: 0, w: 20, r: 8, ts: 0 }], 10);
+  assert.equal(r.applied.length, 0);
+  assert.equal(r.skipped[0].reason, 'unknown-exercise');
+});
+test('reconcileActions rejects an invalid logset (negative weight on a non-assisted exercise) without corrupting the log', () => {
+  const s = C.newSession('d1', 0, null, { exSnapshot: PROGRAM_DAY.ex });
+  const r = C.reconcileActions(s, [{ seq: 1, type: 'logset', exId: 'a', index: 0, w: -5, r: 8, ts: 0 }], 10);
+  assert.equal(r.applied.length, 0);
+  assert.equal(r.skipped[0].reason, 'invalid-set-negative-weight-not-allowed');
+  assert.equal(s.log.a, undefined);
+});
+test('reconcileActions rejects a logset for the wrong session and for a finished session, same as the other action types', () => {
+  const s = C.newSession('d1', 0, null, { exSnapshot: PROGRAM_DAY.ex });
+  const r1 = C.reconcileActions(s, [{ seq: 1, type: 'logset', sessionId: 'not-this-one', exId: 'a', index: 0, w: 20, r: 8 }], 10);
+  assert.equal(r1.skipped[0].reason, 'session-mismatch');
+  C.finishSession(s, 20);
+  const r2 = C.reconcileActions(s, [{ seq: 2, type: 'logset', exId: 'a', index: 0, w: 20, r: 8 }], 30);
+  assert.equal(r2.skipped[0].reason, 'session-finished');
 });
 
 /* ---------- active-session restoration / process-death recovery ---------- */
@@ -344,20 +443,23 @@ test('migrateBlob refuses (locks) data from a newer schema instead of flattening
   assert.equal(out.schemaFound, 99);
 });
 
-/* ---------- workout plans ---------- */
-test('createPlan appends a new empty plan and duplicatePlan copies it with fresh plan/day ids but the same exercise ids', () => {
+/* ---------- workout plans (weekday schedule + reusable templates) ---------- */
+test('createPlan appends a new empty plan and duplicatePlan copies it with fresh plan/template ids but the same exercise ids', () => {
   const plans = [];
   const p = C.createPlan(plans, 'Push A', 1000);
-  const day = C.newPlanDay('Day 1', 1000);
-  C.addExerciseToDay(day, { id: 'incline-db', name: 'Incline DB Press', sets: 3, muscle: 'Chest' });
-  C.addDayToPlan(p, day);
+  const t = C.newTemplate('Push', 1000);
+  C.addExerciseToTemplate(t, { id: 'incline-db', name: 'Incline DB Press', sets: 3, muscle: 'Chest' });
+  C.addTemplateToPlan(p, t);
+  C.setWeekdayTemplates(p, 1, [t.id]);
   const copy = C.duplicatePlan(plans, p.id, 'Push A copy', 2000);
   assert.equal(plans.length, 2);
   assert.notEqual(copy.id, p.id);
-  assert.notEqual(copy.days[0].id, day.id);
-  assert.equal(copy.days[0].ex[0].id, 'incline-db'); // exercise identity preserved for progression history
-  copy.days[0].name = 'Changed';
-  assert.notEqual(p.days[0].name, 'Changed'); // editing the copy never touches the original
+  assert.notEqual(copy.templates[0].id, t.id);
+  assert.equal(copy.templates[0].ex[0].id, 'incline-db'); // exercise identity preserved for progression history
+  assert.deepEqual(copy.schedule[1], [copy.templates[0].id]); // schedule re-pointed at the copied template's new id
+  copy.templates[0].name = 'Changed';
+  assert.notEqual(p.templates[0].name, 'Changed'); // editing the copy never touches the original
+  assert.deepEqual(p.schedule[1], [t.id]); // original plan's own schedule is untouched
 });
 test('deletePlan refuses to remove the last remaining plan', () => {
   const plans = [C.newPlan('Only', 0)];
@@ -379,37 +481,101 @@ test('deletePlan removing the active plan hands back a new active plan id', () =
   assert.equal(r.ok, true);
   assert.equal(r.newActivePlanId, plans[0].id); // plans[1] ('B') shifted into index 0 after splice
 });
-test('addExerciseToDay/removeExerciseFromDay/moveExerciseInDay manage a day exercise list in place', () => {
-  const day = C.newPlanDay('Day', 0);
-  C.addExerciseToDay(day, { id: 'a', name: 'A' });
-  C.addExerciseToDay(day, { id: 'b', name: 'B' });
-  assert.deepEqual(day.ex.map(e => e.id), ['a', 'b']);
-  assert.equal(C.moveExerciseInDay(day, 'b', -1), true);
-  assert.deepEqual(day.ex.map(e => e.id), ['b', 'a']);
-  assert.equal(C.moveExerciseInDay(day, 'b', -1), false); // already first
-  assert.equal(C.removeExerciseFromDay(day, 'a'), true);
-  assert.deepEqual(day.ex.map(e => e.id), ['b']);
+test('addExerciseToTemplate/removeExerciseFromTemplate/moveExerciseInTemplate manage an exercise list in place', () => {
+  const t = C.newTemplate('Template', 0);
+  C.addExerciseToTemplate(t, { id: 'a', name: 'A' });
+  C.addExerciseToTemplate(t, { id: 'b', name: 'B' });
+  assert.deepEqual(t.ex.map(e => e.id), ['a', 'b']);
+  assert.equal(C.moveExerciseInTemplate(t, 'b', -1), true);
+  assert.deepEqual(t.ex.map(e => e.id), ['b', 'a']);
+  assert.equal(C.moveExerciseInTemplate(t, 'b', -1), false); // already first
+  assert.equal(C.removeExerciseFromTemplate(t, 'a'), true);
+  assert.deepEqual(t.ex.map(e => e.id), ['b']);
 });
-test('substituteExerciseInDay replaces an exercise in place, keeping its position', () => {
-  const day = C.newPlanDay('Day', 0);
-  C.addExerciseToDay(day, { id: 'a', name: 'A' });
-  C.addExerciseToDay(day, { id: 'b', name: 'B' });
-  C.substituteExerciseInDay(day, 'a', { id: 'c', name: 'C' });
-  assert.deepEqual(day.ex.map(e => e.id), ['c', 'b']);
+test('substituteExerciseInTemplate replaces an exercise in place, keeping its position', () => {
+  const t = C.newTemplate('Template', 0);
+  C.addExerciseToTemplate(t, { id: 'a', name: 'A' });
+  C.addExerciseToTemplate(t, { id: 'b', name: 'B' });
+  C.substituteExerciseInTemplate(t, 'a', { id: 'c', name: 'C' });
+  assert.deepEqual(t.ex.map(e => e.id), ['c', 'b']);
 });
-test('planDayForWeekday finds the training day scheduled for a given weekday and ignores rest days', () => {
+test('removeTemplateFromPlan strips the deleted template out of every weekday it was scheduled on', () => {
   const plan = C.newPlan('P', 0);
-  const push = C.newPlanDay('Push', 0); push.weekdays = [1];
-  const rest = C.newPlanDay('Rest', 0); rest.rest = true; rest.weekdays = [1];
-  C.addDayToPlan(plan, push); C.addDayToPlan(plan, rest);
-  assert.equal(C.planDayForWeekday(plan, 1), push);
-  assert.equal(C.planDayForWeekday(plan, 2), null);
+  const push = C.newTemplate('Push', 0), pull = C.newTemplate('Pull', 0);
+  C.addTemplateToPlan(plan, push); C.addTemplateToPlan(plan, pull);
+  C.setWeekdayTemplates(plan, 1, [push.id, pull.id]);
+  C.removeTemplateFromPlan(plan, push.id);
+  assert.deepEqual(plan.schedule[1], [pull.id]);
+  assert.equal(plan.templates.length, 1);
 });
-test('newSession captures a plan/day snapshot that stays frozen after the source day is later edited', () => {
-  const day = C.newPlanDay('Push', 0);
-  C.addExerciseToDay(day, { id: 'incline-db', name: 'Incline DB Press', sets: 3, muscle: 'Chest' });
-  const s = C.newSession('d1', 0, null, { planId: 'p1', dayId: day.id, dayName: day.name, exSnapshot: JSON.parse(JSON.stringify(day.ex)) });
-  day.ex[0].name = 'Renamed Press'; // simulate a later plan edit
+test('setWeekdayTemplates de-duplicates defensively', () => {
+  const plan = C.newPlan('P', 0);
+  const push = C.newTemplate('Push', 0);
+  C.addTemplateToPlan(plan, push);
+  C.setWeekdayTemplates(plan, 1, [push.id, push.id, push.id]);
+  assert.deepEqual(plan.schedule[1], [push.id]);
+});
+test('resolveWeekday returns rest for an empty slot, the template directly for exactly one, and a choose prompt for more than one', () => {
+  const plan = C.newPlan('P', 0);
+  const push = C.newTemplate('Push', 0), pushB = C.newTemplate('Push B', 0);
+  C.addTemplateToPlan(plan, push); C.addTemplateToPlan(plan, pushB);
+  C.setWeekdayTemplates(plan, 1, [push.id]);
+  C.setWeekdayTemplates(plan, 3, [push.id, pushB.id]);
+  assert.deepEqual(C.resolveWeekday(plan, 0), { kind: 'rest' });
+  assert.deepEqual(C.resolveWeekday(plan, 1), { kind: 'template', templateId: push.id });
+  assert.deepEqual(C.resolveWeekday(plan, 3), { kind: 'choose', options: [push.id, pushB.id] });
+});
+test('resolveWeekday ignores the weekday schedule entirely for a flexible plan and offers every template', () => {
+  const plan = C.newPlan('P', 0);
+  plan.flexible = true;
+  const push = C.newTemplate('Push', 0), pull = C.newTemplate('Pull', 0);
+  C.addTemplateToPlan(plan, push); C.addTemplateToPlan(plan, pull);
+  // Weekday 1 has nothing scheduled, but flexible mode offers both templates regardless.
+  assert.deepEqual(C.resolveWeekday(plan, 1), { kind: 'choose', options: [push.id, pull.id] });
+});
+test('applyDayOverride passes the normal schedule resolution through untouched when there is no override', () => {
+  assert.deepEqual(C.applyDayOverride({ kind: 'rest' }, null), { kind: 'rest' });
+  assert.deepEqual(C.applyDayOverride({ kind: 'template', templateId: 'push' }, undefined), { kind: 'template', templateId: 'push' });
+  assert.deepEqual(C.applyDayOverride({ kind: 'choose', options: ['a', 'b'] }, null), { kind: 'choose', options: ['a', 'b'] });
+});
+test('applyDayOverride forces rest on an otherwise-scheduled workout day ("Rest Today" / "Skip Workout")', () => {
+  assert.deepEqual(C.applyDayOverride({ kind: 'template', templateId: 'push' }, { type: 'rest' }), { kind: 'rest' });
+});
+test('applyDayOverride re-confirms rest on an already-scheduled rest day without changing anything observable', () => {
+  assert.deepEqual(C.applyDayOverride({ kind: 'rest' }, { type: 'rest' }), { kind: 'rest' });
+});
+test('applyDayOverride forces training on an otherwise-rest day at a specific chosen template ("Skip Rest & Train"), never silently picking one itself', () => {
+  assert.deepEqual(C.applyDayOverride({ kind: 'rest' }, { type: 'train', templateId: 'pull' }), { kind: 'template', templateId: 'pull' });
+});
+test('applyDayOverride ignores a malformed train override with no templateId and falls back to the real schedule', () => {
+  assert.deepEqual(C.applyDayOverride({ kind: 'rest' }, { type: 'train' }), { kind: 'rest' });
+});
+test('migratePlanShape upgrades an old days-based plan into templates+schedule, keeping template ids equal to the old day ids', () => {
+  const oldPlan = {
+    id: 'p1', name: 'Old Plan',
+    days: [
+      { id: 'push', name: 'Push A', tag: 'Chest', cue: 'Go', rest: false, weekdays: [1], ex: [{ id: 'incline-db', name: 'Incline DB Press' }] },
+      { id: 'rest-thu', name: 'Rest', tag: '', cue: '', rest: true, weekdays: [4], ex: [] },
+    ],
+  };
+  const migrated = C.migratePlanShape(oldPlan);
+  assert.equal(migrated.templates.length, 1); // the rest day never becomes a template
+  assert.equal(migrated.templates[0].id, 'push'); // same id a pre-existing session's dayId already points at
+  assert.deepEqual(migrated.schedule[1], ['push']);
+  assert.deepEqual(migrated.schedule[4], []); // old rest day -> empty (rest) slot, nothing lost since it had no exercises
+  assert.equal(migrated.days, undefined);
+});
+test('migratePlanShape is a no-op for a plan already on the current shape', () => {
+  const plan = C.newPlan('P', 0);
+  const before = JSON.stringify(plan);
+  const out = C.migratePlanShape(plan);
+  assert.equal(JSON.stringify(out), before);
+});
+test('newSession captures a plan/template snapshot that stays frozen after the source template is later edited', () => {
+  const t = C.newTemplate('Push', 0);
+  C.addExerciseToTemplate(t, { id: 'incline-db', name: 'Incline DB Press', sets: 3, muscle: 'Chest' });
+  const s = C.newSession('d1', 0, null, { planId: 'p1', dayId: t.id, dayName: t.name, exSnapshot: JSON.parse(JSON.stringify(t.ex)) });
+  t.ex[0].name = 'Renamed Press'; // simulate a later template edit
   assert.equal(s.exSnapshot[0].name, 'Incline DB Press');
   assert.equal(s.dayName, 'Push');
   assert.equal(s.planId, 'p1');
@@ -425,11 +591,11 @@ test('weeklyVolumeByMuscle sums logged volume per muscle group from each session
   assert.equal(vol.Legs, undefined);
 });
 test('weeklyVolumeByMuscle is immune to the plan being edited after the session was logged', () => {
-  const day = C.newPlanDay('Push', 0);
-  C.addExerciseToDay(day, { id: 'a', name: 'A', muscle: 'Chest', timed: false });
-  const s = C.newSession('d1', 0, null, { exSnapshot: JSON.parse(JSON.stringify(day.ex)) });
+  const t = C.newTemplate('Push', 0);
+  C.addExerciseToTemplate(t, { id: 'a', name: 'A', muscle: 'Chest', timed: false });
+  const s = C.newSession('d1', 0, null, { exSnapshot: JSON.parse(JSON.stringify(t.ex)) });
   C.logSetIntoSession(s, { id: 'a' }, 0, { w: 10, r: 10 });
-  day.ex[0].muscle = 'Shoulders'; // edit the live plan afterwards
+  t.ex[0].muscle = 'Shoulders'; // edit the live template afterwards
   const vol = C.weeklyVolumeByMuscle([s]);
   assert.equal(vol.Chest, 100);
   assert.equal(vol.Shoulders, undefined);

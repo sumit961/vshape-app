@@ -115,4 +115,17 @@ public class WorkoutNotificationPlugin extends Plugin {
         ActionQueue.clearUpTo(getContext(), upTo == null ? 0L : upTo);
         call.resolve();
     }
+
+    /** Read-only diagnostic snapshot of the native action journal for the JS side's
+        "Export diagnostic report" feature - see ActionQueue.dumpDiagnostics. */
+    @PluginMethod
+    public void getDiagnostics(PluginCall call) {
+        JSObject ret = new JSObject();
+        try {
+            ret.put("journal", ActionQueue.dumpDiagnostics(getContext()));
+        } catch (Exception e) {
+            ret.put("error", "could not read the native journal (" + e.getClass().getSimpleName() + ")");
+        }
+        call.resolve(ret);
+    }
 }

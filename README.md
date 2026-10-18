@@ -30,13 +30,22 @@ program days (or re-logging the same exercise, which several program days share)
 same date no longer overwrites either one.
 
 **Workout plans** (`plans`, `activePlanId`): the program is no longer hardcoded. A plan is
-`{id, name, days:[{id, name, tag, cue, rest, weekdays, ex:[...]}]}`; `ex` entries are the
-same shape the app always used (sets/rep range/rest/increment/muscle/cue/bw/assisted/timed).
-Only one plan is active at a time and drives what "today's workout" is, via each day's
-`weekdays` (0=Sun..6=Sat). Every session snapshots its day's `ex` array into `exSnapshot`
-(plus `dayName`/`dayTag`/`dayCue`) at the moment it is created, so editing or deleting a
-plan later never changes how an already-started or already-finished session is displayed,
-counted, or rolled into the weekly volume-by-muscle analytics.
+`{id, name, flexible, schedule:{0..6:[templateId]}, templates:[{id, name, tag, cue, ex:[...]}]}`.
+Scheduling and the workout itself are deliberately separate: every weekday (Mon..Sun, fixed,
+never user-named) maps to zero or more **template** ids in `schedule`, and templates are the
+reusable, independently-named workouts ("Push A", "Chest & Triceps", ...) that hold the actual
+exercises - the same template id can be assigned to several weekdays without duplicating its
+exercise definitions. An empty slot is a rest day; more than one template on a weekday means
+Train explicitly asks which one, rather than silently picking the first. `flexible:true` ignores
+the weekday grid entirely and offers every template on every day, for plans with no fixed
+schedule. `ex` entries are the same shape the app always used
+(sets/rep range/rest/increment/muscle/cue/bw/assisted/timed). Every session snapshots its
+template's `ex` array into `exSnapshot` (plus `dayName`/`dayTag`/`dayCue`) at the moment it is
+created, so editing or deleting a plan/template later never changes how an already-started or
+already-finished session is displayed, counted, or rolled into the weekly volume-by-muscle
+analytics. A plan still on the previous (pre-weekday-schedule) shape is upgraded to this one
+automatically and idempotently on load, keeping every template's id equal to its old day id so
+existing sessions are never orphaned from it.
 
 On first load of old (pre-session, or pre-plan) data: each day's existing log becomes one
 `finished` session with no invented start time; the previous raw blob is kept under a
@@ -78,15 +87,19 @@ real browser test tool (e.g. Playwright) against `npm run serve`.
 - **Train:** load and rep suggestions from your history, explicit Start/Pause/Resume/Finish
   workout controls, a durable deadline-based rest timer, PR badge when you beat your
   previous best set. The default is a 5-day split, but it's a fully custom plan under
-  Settings > Workout plans: create/duplicate/delete plans, add training or rest days,
-  assign them to weekdays, and add/remove/reorder/substitute exercises with your own
-  sets, rep ranges, rest and weight increments.
+  Settings > Workout plans: every plan always shows Monday through Sunday, each weekday
+  assigned to an existing reusable workout template (or Rest) rather than a one-off named
+  day; create/duplicate/delete plans and workout templates, assign the same template to
+  several weekdays without duplicating its exercises, pick a flexible (no fixed weekdays)
+  schedule instead, and add/remove/reorder/substitute exercises with your own sets, rep
+  ranges, rest and weight increments.
 - **Progress:** weekly check-in with calorie adjustment advice, weight and strength charts,
   a training-volume-by-muscle-group card for the last 7 days, 14-day steps and calories,
   progress photos, an optional editable baseline measurement.
-- In the Android app, an active workout shows a persistent notification (elapsed time,
-  current exercise, sets done, rest countdown, Pause/Resume and Skip Rest) — see
-  "Workout notification" in `ANDROID.md`.
+- In the Android app, an active workout shows a persistent notification that doubles as a
+  quick-logging controller: current exercise, set number, suggested vs. actual weight/reps
+  with quick +/- weight adjustment, Log Set, rest countdown with Pause/Resume/Skip, and
+  Finish once every set is done — see "Smart workout notification" in `ANDROID.md`.
 - Scrollbars are hidden throughout.
 
 ## Steps from Android (Health Connect)

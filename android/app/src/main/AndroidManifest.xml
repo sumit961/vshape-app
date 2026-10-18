@@ -69,6 +69,12 @@
                 <action android:name="app.vshape.tracker.action.PAUSE" />
                 <action android:name="app.vshape.tracker.action.RESUME" />
                 <action android:name="app.vshape.tracker.action.SKIP_REST" />
+                <action android:name="app.vshape.tracker.action.PAUSE_REST" />
+                <action android:name="app.vshape.tracker.action.RESUME_REST" />
+                <action android:name="app.vshape.tracker.action.LOG_SET" />
+                <action android:name="app.vshape.tracker.action.FINISH" />
+                <action android:name="app.vshape.tracker.action.ADJUST_WEIGHT_UP" />
+                <action android:name="app.vshape.tracker.action.ADJUST_WEIGHT_DOWN" />
             </intent-filter>
         </receiver>
 

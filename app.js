@@ -76,29 +76,29 @@ var DEFAULT_PROGRAM={
     X('pallof','Pallof Press',2,10,12,75,2.5,10,'Obliques and core, per side','Press straight out, resist the cable pulling you into rotation.')]}
 };
 var DEFAULT_DAY_ORDER=['push','pull','legsA','upper','lower'];
-var DEFAULT_WEEKDAY={1:'push',2:'pull',3:'legsA',5:'upper',6:'lower'};
+var DEFAULT_WEEKDAY={1:'push',2:'pull',3:'legsA',5:'upper',6:'lower'}; // Mon push, Tue pull, Wed legs, Thu rest, Fri upper, Sat lower, Sun rest
 function buildDefaultPlan(){
   var plan=VShapeCore.newPlan('Default 5-Day Split',0);
   DEFAULT_DAY_ORDER.forEach(function(k){
     var src=DEFAULT_PROGRAM[k];
-    var day=VShapeCore.newPlanDay(src.name,0);
-    // The seeded default plan's day ids MUST stay equal to the old literal
-    // program keys ('push'/'pull'/...), not a freshly generated id: every
-    // session created before plans existed has session.day set to one of
-    // these literal keys, and openSessionFor/lastSessionFor match sessions
-    // by exact day-id equality. A random id here would silently orphan every
-    // pre-existing finished session from the Train tab's per-day lookup
-    // (it would still exist in storage and still count in history/PR/volume,
-    // which don't filter by day id - but it would wrongly look "not logged"
-    // the moment you revisited that date in Train).
-    day.id=k;
-    day.tag=src.tag;day.cue=src.cue;day.rest=false;
-    day.ex=src.ex.map(function(e){return Object.assign({},e)});
-    VShapeCore.addDayToPlan(plan,day);
+    var t=VShapeCore.newTemplate(src.name,0);
+    // The seeded default plan's template ids MUST stay equal to the old
+    // literal program keys ('push'/'pull'/...), not a freshly generated id:
+    // every session created before plans (or before the weekday-schedule
+    // rework) existed has session.day set to one of these literal keys, and
+    // openSessionFor/lastSessionFor match sessions by exact id equality. A
+    // random id here would silently orphan every pre-existing finished
+    // session from the Train tab's per-day lookup (it would still exist in
+    // storage and still count in history/PR/volume, which don't filter by
+    // this id - but it would wrongly look "not logged" the moment you
+    // revisited that date in Train).
+    t.id=k;
+    t.tag=src.tag;t.cue=src.cue;
+    t.ex=src.ex.map(function(e){return Object.assign({},e)});
+    VShapeCore.addTemplateToPlan(plan,t);
   });
   Object.keys(DEFAULT_WEEKDAY).forEach(function(wd){
-    var day=VShapeCore.findPlanDay(plan,DEFAULT_WEEKDAY[wd]);
-    if(day)day.weekdays.push(Number(wd));
+    VShapeCore.setWeekdayTemplates(plan,Number(wd),[DEFAULT_WEEKDAY[wd]]);
   });
   return plan;
 }
@@ -141,7 +141,7 @@ var TPL=[
 var LS='vshape-tracker-v1';
 function defProfile(){return {targets:{kcal:2350,protein:160,steps:20000,water:3000},weights:{},customFoods:[],baseline:null,notifPermission:null}}
 var S={profile:defProfile(),days:{},photos:{},plans:null,activePlanId:null,active:null,locked:false,lockReason:null,lockedSchemaFound:null};
-var ui={tab:'today',date:todayISO(),today:todayISO(),wd:null,sheet:null,drafts:{},timer:null,exSel:'incline-db',dirty:false,storageOk:true,storageMsg:null,hcDenied:false,lastNotifError:null};
+var ui={tab:'today',date:todayISO(),today:todayISO(),wd:null,sheet:null,drafts:{},timer:null,exSel:'incline-db',dirty:false,storageOk:true,storageMsg:null,hcDenied:false,lastNotifError:null,trainPicker:false};
 var installEvt=null;
 
 function saveLocal(){
@@ -161,9 +161,17 @@ function saveLocal(){
 function ensurePlans(plansIn,activeIn){
   var plans=(plansIn&&plansIn.length)?plansIn:null;
   var activePlanId=activeIn||null;
+  var shapeMigrated=false;
   if(!plans){var p=buildDefaultPlan();plans=[p];activePlanId=p.id;}
+  else{
+    // Upgrade any plan still on the pre-weekday-schedule shape (days:[...],
+    // no templates/schedule) in place; a plan already current is untouched.
+    plans.forEach(function(pl){
+      if(!pl.templates){VShapeCore.migratePlanShape(pl);shapeMigrated=true}
+    });
+  }
   if(!VShapeCore.findPlan(plans,activePlanId))activePlanId=plans[0].id;
-  return {plans:plans,activePlanId:activePlanId};
+  return {plans:plans,activePlanId:activePlanId,shapeMigrated:shapeMigrated};
 }
 /* Sessions created before plans existed have no exSnapshot; backfill one from
    whatever exercise ids they actually logged, using the plan we just seeded
@@ -206,6 +214,7 @@ function loadLocal(){
   var plansHadNone=!(out.plans&&out.plans.length);
   var pr=ensurePlans(out.plans,out.activePlanId);
   S.plans=pr.plans;S.activePlanId=pr.activePlanId;
+  var plansShapeMigrated=pr.shapeMigrated;
   backfillSessionSnapshots();
   var flat=flatExerciseLookup();
   Object.keys(S.days).forEach(function(d){VShapeCore.quarantineInvalidSets(S.days[d],flat)});
@@ -215,14 +224,15 @@ function loadLocal(){
     if(!asess||!(asess.status==='active'||asess.status==='paused')){S.active=null}
     else{ui.tab='train';ui.date=S.active.date;ui.wd=asess.day}
   }
-  if(out.migrated||plansHadNone)saveLocal();
+  if(out.migrated||plansHadNone||plansShapeMigrated)saveLocal();
 }
 function ensureDay(d){
-  if(!S.days[d])S.days[d]={date:d,food:[],steps:0,stepsSource:null,water:0,sessions:[],quarantine:{sets:[],food:[]}};
+  if(!S.days[d])S.days[d]={date:d,food:[],steps:0,stepsSource:null,water:0,sessions:[],quarantine:{sets:[],food:[]},override:null};
   var x=S.days[d];
   if(!x.food)x.food=[];
   if(!x.sessions)x.sessions=[];
   if(!x.quarantine)x.quarantine={sets:[],food:[]};
+  if(x.override===undefined)x.override=null;
   return x;
 }
 function queueSave(){saveLocal()}
@@ -230,21 +240,36 @@ function saveDay(d){queueSave('day-'+d)}
 function saveProfile(){queueSave('profile')}
 
 /* ---------- plans (bridges S.plans onto VShapeCore's pure plan model) ---------- */
+// Vocabulary: a Plan has a fixed Mon..Sun `schedule` (weekday -> template
+// id(s)) and a pool of reusable, named `templates` (e.g. "Push A",
+// "Chest & Triceps"). Scheduling is a mapping, not a property of the
+// template, so the same template can be assigned to several weekdays
+// without duplicating its exercises.
 function activePlan(){return VShapeCore.findPlan(S.plans,S.activePlanId)}
-function dayById(dayId){var p=activePlan();return p?VShapeCore.findPlanDay(p,dayId):null}
-function planDays(){var p=activePlan();return p?p.days:[]}
+function templateById(templateId){var p=activePlan();return p?VShapeCore.findTemplate(p,templateId):null}
+function planTemplates(){var p=activePlan();return p?p.templates:[]}
+/* Resolves what weekday `d` (an ISO date string) means for the active plan:
+   'rest' (nothing scheduled), a template id (exactly one option), or
+   'choose' (more than one template scheduled - the UI must ask, never
+   silently pick the first). */
 function autoDay(d){
-  var wd=parseISO(d).getDay(),day=VShapeCore.planDayForWeekday(activePlan(),wd);
-  return day?day.id:'rest';
+  var wd=parseISO(d).getDay(),r=VShapeCore.resolveWeekday(activePlan(),wd);
+  var day=S.days[d];
+  r=VShapeCore.applyDayOverride(r,day&&day.override);
+  return r.kind==='template'?r.templateId:r.kind;
 }
-/* Flat id->exercise map across every current plan's every day. Used only as
-   a fallback (quarantine validation on legacy data, the plan picker, the
-   strength chart) - anything about an already-started or already-finished
-   session always prefers that session's own frozen exSnapshot instead, so
-   editing a plan later never rewrites history. */
+function chooseOptionsFor(d){
+  var wd=parseISO(d).getDay(),r=VShapeCore.resolveWeekday(activePlan(),wd);
+  return r.kind==='choose'?r.options:[];
+}
+/* Flat id->exercise map across every current plan's every template. Used
+   only as a fallback (quarantine validation on legacy data, the plan
+   picker, the strength chart) - anything about an already-started or
+   already-finished session always prefers that session's own frozen
+   exSnapshot instead, so editing a plan later never rewrites history. */
 function flatExerciseLookup(){
   var m={};
-  (S.plans||[]).forEach(function(p){(p.days||[]).forEach(function(d){(d.ex||[]).forEach(function(e){if(!m[e.id])m[e.id]=e})})});
+  (S.plans||[]).forEach(function(p){(p.templates||[]).forEach(function(t){(t.ex||[]).forEach(function(e){if(!m[e.id])m[e.id]=e})})});
   return m;
 }
 /* Every exercise id the user has ever trained, for the strength-chart picker
@@ -287,16 +312,20 @@ function getOpenSessionAnywhere(){
    under the lifter's feet; otherwise it's whatever the active plan currently
    says this day looks like. */
 function trainDayView(date,dayKey){
-  if(dayKey==='rest')return null;
-  var session=openSessionFor(date,dayKey);
-  return session?sessionDayView(session):dayById(dayKey);
+  if(dayKey==='rest'||dayKey==='choose')return null;
+  // displaySessionFor (open, else last/finished) - not just openSessionFor - so re-viewing a
+  // day right after finishing it still shows that session's own frozen exSnapshot, exactly
+  // like history()/PR/volume already do, instead of silently switching to whatever the LIVE
+  // plan template currently looks like (which could have since been edited).
+  var session=displaySessionFor(date,dayKey);
+  return session?sessionDayView(session):templateById(dayKey);
 }
 function startOrGetSession(date,dayKey){
   var day=ensureDay(date);
   var decision=VShapeCore.decideSessionStart(day,dayKey,getOpenSessionAnywhere());
   if(decision.action==='reuse')return {session:decision.session,created:false};
   if(decision.action==='blocked')return {blocked:true,blockingSession:decision.blockingSession};
-  var liveDay=dayById(dayKey);
+  var liveDay=templateById(dayKey);
   var s=VShapeCore.newSession(dayKey,Date.now(),null,{
     planId:S.activePlanId,dayId:dayKey,
     dayName:liveDay?liveDay.name:null,dayTag:liveDay?liveDay.tag:null,dayCue:liveDay?liveDay.cue:null,
@@ -305,14 +334,6 @@ function startOrGetSession(date,dayKey){
   day.sessions.push(s);
   S.active={date:date,id:s.id};
   return {session:s,created:true};
-}
-function currentExerciseLabel(session,P){
-  if(!P||!P.ex.length)return '';
-  for(var i=0;i<P.ex.length;i++){
-    var e=P.ex[i],done=((session.log[e.id])||[]).filter(Boolean).length;
-    if(done<e.sets)return e.name;
-  }
-  return P.ex[P.ex.length-1].name;
 }
 
 function syncText(){
@@ -422,6 +443,72 @@ function idbDelP(d){return idbRun('photos','readwrite',function(s){return s.dele
 function idbPut(p){idbPutP(p).then(function(r){if(!r.ok)toast('Could not keep that photo on this device')})}
 function idbDel(d){idbDelP(d)}
 function idbPutSafety(raw){idbRun('safety','readwrite',function(s){return s.put({ts:Date.now(),raw:raw})}).catch(function(){})}
+/* Non-destructive diagnostic snapshot for a data-loss/notification-sync report: structural
+   counts and ids only, never the user's actual food/weight/photo content. Reads whatever
+   local/native storage currently holds without touching any of it. */
+/* Four distinct categories a data-loss/sync report needs to tell apart, so "it's gone" can be
+   answered precisely instead of guessed at:
+   - present: a logged, non-null entry at that exact set index - nothing wrong.
+   - pending: an exercise's set index with nothing logged there yet. Normal/expected while the
+     session is still active/paused; flagged separately (incompleteOnFinish) if the session is
+     already finished, since that combination is the one worth a second look.
+   - hidden/quarantined: moved OUT of session.log by quarantineInvalidSets because it failed
+     validateSet (e.g. after a plan edit changed an exercise's rules) - never deleted, listed
+     here with its original value and the exact reason it was pulled.
+   - pending-native: committed on-device by the notification but not yet reconciled into this
+     session.log/localStorage at all - see report.native.journal.queue/nativeCommits. */
+function diagDay(d,day){
+  return {
+    date:d,
+    override:day.override||null,
+    sessionCount:(day.sessions||[]).length,
+    sessions:(day.sessions||[]).map(function(s){
+      var sets=[];
+      Object.keys(s.log||{}).forEach(function(exId){
+        (s.log[exId]||[]).forEach(function(entry,i){if(entry)sets.push({exId:exId,index:i,w:entry.w,r:entry.r})});
+      });
+      var exercises=(s.exSnapshot||[]).map(function(e){
+        var logged=(s.log&&s.log[e.id])||[],loggedIndexes=[],pendingIndexes=[];
+        for(var j=0;j<e.sets;j++){if(logged[j])loggedIndexes.push(j);else pendingIndexes.push(j)}
+        return {exId:e.id,name:e.name,expectedSets:e.sets,loggedIndexes:loggedIndexes,pendingIndexes:pendingIndexes,
+          incompleteOnFinish:s.status==='finished'&&pendingIndexes.length>0};
+      });
+      return {id:s.id,day:s.day,dayId:s.dayId,status:s.status,startedAt:s.startedAt,finishedAt:s.finishedAt,lastAppliedSeq:s.lastAppliedSeq||0,
+        exSnapshotCount:(s.exSnapshot||[]).length,setCount:sets.length,sets:sets,exercises:exercises};
+    }),
+    quarantine:((day.quarantine&&day.quarantine.sets)||[]).map(function(q){return {sessionId:q.sessionId,exId:q.exId,index:q.index,value:q.value,reason:q.reason}})
+  };
+}
+function buildDiagnosticReport(){
+  var report={
+    app:'vshape-tracker-diagnostics',exportedAt:new Date().toISOString(),
+    currentSchemaVersion:VShapeCore.SCHEMA_VERSION,
+    live:{locked:S.locked,lockReason:S.lockReason,lockedSchemaFound:S.lockedSchemaFound,
+      dayCount:Object.keys(S.days).length,
+      days:Object.keys(S.days).sort().map(function(d){return diagDay(d,S.days[d])}),
+      planCount:(S.plans||[]).length,activePlanId:S.activePlanId,
+      active:S.active||null,storageOk:ui.storageOk,storageMsg:ui.storageMsg},
+    storageKeys:[],idbSafetyCopies:0,native:null
+  };
+  try{
+    for(var i=0;i<localStorage.length;i++){
+      var k=localStorage.key(i);if(!k)continue;
+      var raw=null;try{raw=localStorage.getItem(k)}catch(e){}
+      var parsed=null,readable=true;try{parsed=raw?JSON.parse(raw):null}catch(e){readable=false}
+      report.storageKeys.push({key:k,bytes:raw?raw.length:0,readable:readable,schema:parsed&&parsed.schema!==undefined?parsed.schema:null});
+    }
+  }catch(e){}
+  return idbRun('safety','readonly',function(s){return s.getAll()}).then(function(list){report.idbSafetyCopies=(list||[]).length}).catch(function(){}).then(function(){
+    var plugin=wnPlugin();
+    if(!plugin||!isNative()||!plugin.getDiagnostics)return report;
+    return Promise.resolve(plugin.getDiagnostics()).then(function(res){
+      report.native=res||null;
+      var j=res&&res.journal;
+      if(j){report.native.pendingNativeActionCount=(j.queue||[]).length;report.native.pendingNativeCommitCount=(j.nativeCommits||[]).length;}
+      return report;
+    }).catch(function(){return report});
+  });
+}
 function loadPhotos(){
   idbRun('photos','readonly',function(s){return s.getAll()}).then(function(list){
     (list||[]).forEach(function(p){S.photos[p.date]=p});
@@ -510,9 +597,16 @@ function header(){
   return '<header class="top"><div class="bar"><div class="brand"><span class="mark"></span>V-SHAPE</div><span class="sync" id="sync">'+syncText()+'</span><button class="icon" data-act="settings" aria-label="Settings">'+IC.gear+'</button></div>'+
   '<div class="datenav"><button class="icon" data-act="dprev" aria-label="Previous day">&#8249;</button><button class="dlabel" data-act="dtoday" aria-label="Jump to today">'+(isT?'Today, ':'')+esc(fmtDate(ui.date))+'</button><button class="icon" data-act="dnext" aria-label="Next day"'+(isT?' disabled':'')+'>&#8250;</button></div></header>';
 }
+/* Reads whatever session is relevant to show for this date/key: the open one if there is
+   one, otherwise the last (typically just-finished) one - never silently falls back to "no
+   session" just because the only session for today happens to already be finished. This is
+   what keeps the sets-done count (and the exercise rows in viewTrain) showing the real
+   logged data right after finishing a workout, instead of reading an empty {} log from a
+   lookup that deliberately excludes finished sessions. */
+function displaySessionFor(date,key){return openSessionFor(date,key)||lastSessionFor(date,key)}
 function setsDone(key,date){
   var P=trainDayView(date,key);if(!P)return {done:0,total:0,vol:0};
-  return VShapeCore.sessionSetsDone(openSessionFor(date,key),P);
+  return VShapeCore.sessionSetsDone(displaySessionFor(date,key),P);
 }
 function gymDone(d){
   var x=S.days[d];
@@ -558,7 +652,9 @@ function viewToday(){
   var rem=(remK>=0?num(remK)+' kcal left':num(-remK)+' kcal over')+' and '+(remP>0?num(remP)+' g protein to go':'protein target met');
   var key=curWd(),P=trainDayView(ui.date,key),sd=P?setsDone(key,ui.date):null;
   var wc=weeklyCheck(),wToday=S.profile.weights[ui.date];
-  var train=P?'<div class="row"><div class="grow"><div class="num" style="font-size:26px;font-weight:700">'+esc(P.name)+'</div><div class="muted small">'+esc(P.tag)+'</div></div><div class="num" style="font-size:22px;font-weight:600">'+sd.done+'/'+sd.total+'<span class="muted small"> sets</span></div></div><button class="btn full" style="margin-top:12px" data-act="tab" data-tab="train">'+(sd.done?'Continue workout':'Open workout')+'</button>':'<div class="muted">Rest day. Normal work and walking are enough. You can still open a session from the Train tab.</div>';
+  var train=P?'<div class="row"><div class="grow"><div class="num" style="font-size:26px;font-weight:700">'+esc(P.name)+'</div><div class="muted small">'+esc(P.tag)+'</div></div><div class="num" style="font-size:22px;font-weight:600">'+sd.done+'/'+sd.total+'<span class="muted small"> sets</span></div></div><button class="btn full" style="margin-top:12px" data-act="tab" data-tab="train">'+(sd.done?'Continue workout':'Open workout')+'</button>':
+    key==='choose'?'<div class="muted">More than one workout is scheduled today.</div><button class="btn full" style="margin-top:12px" data-act="tab" data-tab="train">Choose on the Train tab</button>':
+    '<div class="muted">Rest day. Normal work and walking are enough. You can still open a session from the Train tab.</div>';
   return installBanner()+heroHTML()+weekStrip()+'<div class="card"><div class="rings">'+ring(tot.k,T.kcal,'var(--accent)','Calories','kcal')+ring(tot.p,T.protein,'var(--protein)','Protein','g')+ring(steps,T.steps,'var(--steps)','Steps','steps')+'</div><div class="rem">'+rem+'</div><div class="muted small" style="margin-top:6px">Carbs '+num(tot.c)+' g &middot; Fat '+num(tot.f)+' g</div></div>'+
   '<div class="card"><h3>Steps</h3><div class="row"><div class="stepbig grow">'+num(steps)+'</div><button class="chip" data-act="stepadd" data-n="1000">+1,000</button><button class="chip" data-act="stepadd" data-n="-1000">-1,000</button></div>'+
   '<div class="inline" style="margin-top:10px"><input id="stepsIn" inputmode="numeric" placeholder="Type today\'s count from Samsung Health" aria-label="Steps"><button class="btn" data-act="stepset">Set</button></div>'+
@@ -593,11 +689,14 @@ function e1rm(ex,s){return VShapeCore.e1rm(ex,s)}
 function isPR(ex,date,logged){return VShapeCore.isPR(ex,history(ex.id,date),logged)}
 function lifecycleBar(openSession,lastSession,P){
   if(!openSession){
+    var day=S.days[ui.date],ov=day&&day.override;
+    var ovNote=ov?'<div class="row" style="margin-top:8px"><div class="grow muted small">Training instead of your scheduled rest day.</div><button class="btn ghost sm" data-act="undooverride">Undo</button></div>':'';
     if(lastSession&&lastSession.status==='finished'){
       var doneTxt=fmtClock(VShapeCore.sessionElapsedMs(lastSession,Date.now()));
       return '<div class="card lc"><div class="row"><div class="grow muted small">Finished '+esc(lastSession.dayName||(P?P.name:'workout'))+' &middot; '+doneTxt+' elapsed.</div><button class="btn ghost sm" data-act="startworkout">Start another</button></div></div>';
     }
-    return '<div class="card lc"><button class="btn full" data-act="startworkout">Start workout</button></div>';
+    return '<div class="card lc"><button class="btn full" data-act="startworkout">Start workout</button>'+
+      '<div class="two" style="margin-top:8px"><button class="btn ghost sm" data-act="resttoday">Rest today</button><button class="btn ghost sm" data-act="skipworkout">Skip workout</button></div>'+ovNote+'</div>';
   }
   var session=openSession;
   var elapsed=VShapeCore.sessionElapsedMs(session,Date.now()),timeTxt=fmtClock(elapsed);
@@ -606,27 +705,62 @@ function lifecycleBar(openSession,lastSession,P){
     '<button class="btn sm" data-act="'+(isPaused?'resumeworkout':'pauseworkout')+'">'+(isPaused?'Resume':'Pause')+'</button>'+
     '<button class="btn ghost sm" style="margin-left:6px" data-act="finishworkout">Finish</button></div></div>';
 }
+function chooseCard(){
+  var opts=chooseOptionsFor(ui.date).map(templateById).filter(Boolean);
+  if(!opts.length)return '';
+  return '<div class="card"><h3>More than one workout is scheduled today</h3><div class="pills" role="group" aria-label="Pick today\'s workout">'+
+    opts.map(function(t){return '<button class="pill" data-act="wd" data-k="'+t.id+'">'+esc(t.name)+'</button>'}).join('')+'</div></div>';
+}
+/* "Skip Rest & Train" on a scheduled rest day: unlike chooseCard (which only ever offers the
+   weekday's own ambiguous options), this offers every template in the active plan, since
+   nothing at all is scheduled for this date to narrow it down. Picking one stores a
+   date-specific override (never a session, never a weekday schedule change) and lands on
+   that workout's normal Start-workout card. */
+function trainPickerHTML(){
+  var opts=planTemplates();
+  if(!opts.length)return '';
+  return '<div class="card"><h3>Train anyway: pick a workout</h3><div class="pills" role="group" aria-label="Pick a workout">'+
+    opts.map(function(t){return '<button class="pill" data-act="traininstead" data-k="'+t.id+'">'+esc(t.name)+'</button>'}).join('')+
+    '</div><button class="btn ghost sm" style="margin-top:10px" data-act="skiprestclose">Cancel</button></div>';
+}
 function viewTrain(){
-  var key=curWd(),trainable=planDays().filter(function(d){return !d.rest});
-  var pills='<div class="pills" role="group" aria-label="Workout day">'+trainable.map(function(d){return '<button class="pill" data-act="wd" data-k="'+d.id+'" aria-pressed="'+(d.id===key)+'">'+esc(d.name)+'</button>'}).join('')+'</div>';
+  var key=curWd(),trainable=planTemplates();
+  var pills='<div class="pills" role="group" aria-label="Workout">'+trainable.map(function(t){return '<button class="pill" data-act="wd" data-k="'+t.id+'" aria-pressed="'+(t.id===key)+'">'+esc(t.name)+'</button>'}).join('')+'</div>';
   if(key==='rest'){
-    var wdNum=parseISO(ui.date).getDay();
-    var restDay=planDays().filter(function(d){return d.rest&&(d.weekdays||[]).indexOf(wdNum)>=0})[0];
-    var msg=restDay&&restDay.cue?restDay.cue:'Normal work and walking are enough. Pick a session above if you want to train anyway.';
-    return pills+'<div class="card"><h3>'+esc(restDay?restDay.name:'Rest day')+'</h3><p style="margin:0">'+esc(msg)+'</p></div>';
+    var day=S.days[ui.date],ov=day&&day.override;
+    var note=ov?'<p class="muted small" style="margin:10px 0 0">'+(ov.reason==='skip'?'Workout skipped for today.':'Marked as rest today.')+' <button class="btn ghost sm" data-act="undooverride">Undo</button></p>':
+      '<div class="two" style="margin-top:12px"><button class="btn ghost" data-act="resttoday">Rest today</button><button class="btn" data-act="skiprestopen">Skip rest &amp; train</button></div>';
+    var picker=ui.trainPicker?trainPickerHTML():'';
+    // No `pills` here, deliberately: the quick-pick pills set the ephemeral ui.wd, which
+    // bypasses the override system entirely (no Undo, no persisted date-specific decision)
+    // and would silently keep showing a workout on this date instead of Rest Day on every
+    // later render until an unrelated date-navigation action happened to clear ui.wd. The
+    // only way to train on a rest day is the deliberate, undoable "Skip rest & train" flow.
+    return '<div class="card"><h3>Rest day</h3><p style="margin:0">Normal work and walking are enough.</p>'+note+'</div>'+picker;
+  }
+  if(key==='choose'){
+    return pills+chooseCard();
   }
   var P=trainDayView(ui.date,key);
-  if(!P)return pills+'<div class="card"><h3>No plan day</h3><p style="margin:0">This day is no longer in your active plan. Pick a session above.</p></div>';
-  var sd=setsDone(key,ui.date),session=openSessionFor(ui.date,key),log=(session&&session.log)||{};
-  var out=pills+lifecycleBar(session,lastSessionFor(ui.date,key),P)+'<div class="card"><div class="row">'+'<div class="grow"><div class="num" style="font-size:30px;font-weight:700;line-height:1.1">'+esc(P.name)+'</div><div class="muted small">'+esc(P.tag)+'</div></div><div style="text-align:right"><div class="num" style="font-size:24px;font-weight:700">'+sd.done+'/'+sd.total+'</div><div class="muted small">'+(sd.vol?num(sd.vol)+' kg volume':'sets done')+'</div></div></div><div class="cue">'+esc(P.cue)+'</div></div>';
+  if(!P)return pills+'<div class="card"><h3>No workout</h3><p style="margin:0">This workout is no longer in your active plan. Pick one above.</p></div>';
+  var openSession=openSessionFor(ui.date,key),displaySession=displaySessionFor(ui.date,key);
+  var sd=setsDone(key,ui.date),log=(displaySession&&displaySession.log)||{};
+  // Read-only whenever there is no OPEN session to log into (i.e. we're only showing a
+  // finished one): sets render disabled with their real values and no Log/Undo button, so
+  // viewing a just-finished workout can never look like it reset the data, and tapping an
+  // old row can never surprise-create a brand-new session (startOrGetSession always creates
+  // fresh once the prior one is finished - see decideSessionStart).
+  var readOnly=!openSession&&!!displaySession;
+  var out=pills+lifecycleBar(openSession,lastSessionFor(ui.date,key),P)+'<div class="card"><div class="row">'+'<div class="grow"><div class="num" style="font-size:30px;font-weight:700;line-height:1.1">'+esc(P.name)+'</div><div class="muted small">'+esc(P.tag)+'</div></div><div style="text-align:right"><div class="num" style="font-size:24px;font-weight:700">'+sd.done+'/'+sd.total+'</div><div class="muted small">'+(sd.vol?num(sd.vol)+' kg volume':'sets done')+'</div></div></div><div class="cue">'+esc(P.cue)+'</div></div>';
   P.ex.forEach(function(ex){
     var sg=suggest(ex,ui.date),rows='',logged=log[ex.id]||[];
     for(var i=0;i<ex.sets;i++){
       var L=logged[i],dr=ui.drafts[ui.date+'|'+ex.id+'|'+i]||{};
       var prevLogged=null;for(var j=i-1;j>=0;j--){if(logged[j]){prevLogged=logged[j];break}}
-      var w=L?L.w:(dr.w!==undefined?dr.w:fmtKg(prevLogged?prevLogged.w:sg.w));
-      var r=L?L.r:(dr.r!==undefined?dr.r:sg.reps[i]);
-      rows+='<div class="set'+(L?' done':'')+'" data-ex="'+ex.id+'" data-i="'+i+'"><span class="sn">'+(i+1)+'</span><div><label for="w-'+ex.id+i+'">'+(ex.bw?'+kg':'kg')+'</label><input id="w-'+ex.id+i+'" data-f="w" inputmode="decimal" value="'+esc(w)+'"'+(L?' disabled':'')+'></div><div><label for="r-'+ex.id+i+'">'+(ex.timed?'sec':'reps')+'</label><input id="r-'+ex.id+i+'" data-f="r" inputmode="numeric" value="'+esc(r)+'"'+(L?' disabled':'')+'></div><button class="ck" data-act="logset" aria-label="'+(L?'Undo':'Log')+' set '+(i+1)+' of '+esc(ex.name)+'">'+IC.check+'</button></div>';
+      var w=L?L.w:(readOnly?'':(dr.w!==undefined?dr.w:fmtKg(prevLogged?prevLogged.w:sg.w)));
+      var r=L?L.r:(readOnly?'':(dr.r!==undefined?dr.r:sg.reps[i]));
+      var disabled=(L||readOnly)?' disabled':'';
+      rows+='<div class="set'+(L?' done':'')+'" data-ex="'+ex.id+'" data-i="'+i+'"><span class="sn">'+(i+1)+'</span><div><label for="w-'+ex.id+i+'">'+(ex.bw?'+kg':'kg')+'</label><input id="w-'+ex.id+i+'" data-f="w" inputmode="decimal" value="'+esc(w)+'"'+disabled+'></div><div><label for="r-'+ex.id+i+'">'+(ex.timed?'sec':'reps')+'</label><input id="r-'+ex.id+i+'" data-f="r" inputmode="numeric" value="'+esc(r)+'"'+disabled+'></div>'+(readOnly?'':'<button class="ck" data-act="logset" aria-label="'+(L?'Undo':'Log')+' set '+(i+1)+' of '+esc(ex.name)+'">'+IC.check+'</button>')+'</div>';
     }
     var lastTxt=sg.last?'Last ('+fmtDate(sg.last.d,{day:'numeric',month:'short'})+'): '+sg.last.sets.map(function(s){return fmtKg(s.w)+' x '+s.r}).join(', '):'';
     out+='<div class="card ex"><div class="ex-h"><div class="grow"><h3>'+esc(ex.name)+'</h3><div class="muted small">'+esc(ex.muscle)+' &middot; rest '+(ex.rest>=120?Math.round(ex.rest/60*2)/2+' min':ex.rest+' s')+'</div></div><span class="rng">'+(isPR(ex,ui.date,logged)?'<b class="pr">PR</b> ':'')+ex.sets+' x '+ex.lo+'&ndash;'+ex.hi+(ex.timed?'s':'')+'</span></div>'+
@@ -759,30 +893,87 @@ function shrink(file,cb){
 }
 
 /* ---------- native workout notification bridge ---------- */
+// Builds the full payload the native notification needs to act as a quick-logging
+// controller, not just a readout: the session's own revision/identity fields (sessionId,
+// exId, setIndex, lastAppliedSeq) so the native side can stamp a logset action with the
+// exact set it means, the derived control state, the suggested load/reps for the pending
+// set (kept separate from whatever the user may be locally adjusting - the notification
+// only ever sends back whatever it actually displays, never silently invents a value), and
+// the current/overall set-completion counts for both the whole workout and the one
+// exercise in progress.
+// Phase 2B.3: the notification needs to be able to validate, commit and advance through the
+// ENTIRE rest of the workout natively, without the WebView running at all - so this payload
+// carries everything required to do that offline, not just the one currently-pending set:
+// - exSnapshot: the full, frozen exercise list (native needs ex.sets/lo/hi/rest/inc/bw/
+//   assisted/timed for every exercise, not just the current one, to walk forward).
+// - committedLog: session.log exactly as JS currently has it. Native resets its own "sets
+//   committed since the last sync" cache against this every time it arrives, which is what
+//   stops a native-side commit that has since actually been reconciled (or an in-app edit,
+//   e.g. an undo) from silently diverging from what JS already knows - see
+//   ActionQueue.pruneNativeCommits on the native side.
+// - suggestions: one entry per exercise that still has at least one pending set, each with the
+//   full suggested reps array for that exercise - a lookahead table, not just "the current
+//   set's suggestion" - so native can keep presenting correct suggested loads for sets several
+//   exercises ahead without ever running suggestProgression (history-based, JS-only) itself.
 function pushNotificationState(){
   var plugin=wnPlugin();if(!plugin||!isNative())return;
   var s=getOpenSessionAnywhere();
   if(!VShapeCore.shouldShowNotification(s)){if(plugin.hide)Promise.resolve(plugin.hide()).catch(function(err){console&&console.warn&&console.warn('WorkoutNotification.hide failed',err)});return}
   var P=sessionDayView(s),sd=VShapeCore.sessionSetsDone(s,P);
+  var state=VShapeCore.notificationState(s,P);
+  var pending=VShapeCore.nextPendingSet(s,P);
+  var pendingEx=pending?P.ex[pending.exIndex]:null;
+  var sg=pendingEx?suggest(pendingEx,S.active?S.active.date:todayISO()):null;
+  var exDone=pendingEx?((s.log[pendingEx.id]||[]).filter(Boolean).length):0;
+  var pendingExIds={};
+  VShapeCore.pendingSetsList(s,P).forEach(function(p){pendingExIds[p.exId]=true});
+  var suggestions=Object.keys(pendingExIds).map(function(exId){
+    var ex=P.ex.filter(function(e){return e.id===exId})[0];
+    var g=ex?suggest(ex,S.active?S.active.date:todayISO()):null;
+    return g?{exId:exId,w:g.w,reps:g.reps}:null;
+  }).filter(Boolean);
   var payload={
-    sessionId:s.id,title:P?P.name:'Workout',status:s.status,
+    sessionId:s.id,title:P?P.name:'Workout',status:s.status,state:state,
+    lastAppliedSeq:s.lastAppliedSeq||0,
     startedAtEpochMs:s.startedAt,pausedMs:s.pausedMs||0,
     elapsedMs:VShapeCore.sessionElapsedMs(s,Date.now()),
     setsDone:sd.done,setsTotal:sd.total,
-    exerciseName:currentExerciseLabel(s,P),
+    exerciseName:pendingEx?pendingEx.name:(P.ex.length?P.ex[P.ex.length-1].name:''),
+    exId:pendingEx?pendingEx.id:null,
+    setIndex:pending?pending.setIndex:null,
+    setNumber:pending?pending.setIndex+1:null,
+    exerciseSetsDone:exDone,exerciseSetsTotal:pendingEx?pendingEx.sets:0,
+    suggestedW:sg?sg.w:null,suggestedR:(sg&&pending)?sg.reps[pending.setIndex]:null,
+    isBodyweight:pendingEx?!!pendingEx.bw:false,isTimed:pendingEx?!!pendingEx.timed:false,
+    weightIncrement:pendingEx?(pendingEx.inc||0):0,
     restActive:!!s.rest,restPaused:s.rest?!!s.rest.paused:false,
     restDeadlineEpochMs:(s.rest&&!s.rest.paused)?s.rest.deadline:null,
-    restRemainingMs:s.rest?VShapeCore.restRemainingMs(s,Date.now()):null
+    restRemainingMs:s.rest?VShapeCore.restRemainingMs(s,Date.now()):null,
+    exSnapshot:P.ex,committedLog:s.log,suggestions:suggestions
   };
   if(plugin.show)Promise.resolve(plugin.show(payload)).then(function(res){if(res&&res.error)reportNotifError(res.error)}).catch(function(){reportNotifError('could not update the notification')});
 }
 function reconcileNativeActions(){
-  var plugin=wnPlugin();if(!plugin||!isNative())return Promise.resolve();
+  var plugin=wnPlugin();if(!plugin||!isNative()||!plugin.getPendingActions)return Promise.resolve();
   return Promise.resolve(plugin.getPendingActions()).then(function(res){
     if(res&&res.error)reportNotifError(res.error);
     var actions=(res&&res.actions)||[];
     if(!actions.length)return;
-    var session=getOpenSessionAnywhere();
+    var liveSession=getOpenSessionAnywhere();
+    var day=(liveSession&&S.active)?S.days[S.active.date]:null;
+    var idx=(day&&liveSession)?day.sessions.indexOf(liveSession):-1;
+    /* Reconcile against a disposable CLONE, never the live session object directly. If we
+       mutated the live object first and the save below then failed, the live session would
+       be left holding an applied-but-never-persisted change - and ANY later, unrelated
+       render() (switching tabs, logging food, anything at all; render() unconditionally
+       calls pushNotificationState()) would push that same unsaved state to native as if it
+       were durable. Native's pruneNativeCommits would then discard its own cached copy of
+       that exact set because it looks "settled" in what JS just sent - leaving the set
+       nowhere at all: not in localStorage (the save failed) and no longer in the native
+       cache either. Working on a clone and only swapping it into S.days once the save has
+       actually succeeded (and rolling the swap back if it hasn't) is what keeps the live
+       session always equal to whatever is truly durable. */
+    var session=idx>=0?clone(liveSession):liveSession;
     var r=VShapeCore.reconcileActions(session,actions,Date.now());
     /* reconcileActions puts every action from this batch into either applied or
        skipped - never drops one silently - so acknowledging (clearing) the
@@ -795,7 +986,18 @@ function reconcileNativeActions(){
        effect never durably saved. */
     var maxSeq=actions.reduce(function(m,a){return Math.max(m,a.seq||0)},0);
     var savedOk=true;
-    if(r.applied.length&&S.active){saveDay(S.active.date);savedOk=(ui.storageOk!==false);render();drawTimer()}
+    if(r.applied.length&&idx>=0){
+      day.sessions[idx]=session;
+      saveDay(S.active.date);
+      savedOk=(ui.storageOk!==false);
+      if(!savedOk)day.sessions[idx]=liveSession; /* roll back: the save failed, so the live session must stay exactly what localStorage still has */
+    }
+    /* Refresh the notification whenever we actually processed a batch, not only when
+       something was applied: a skip-only batch (a rejected invalid-weight adjustment, a
+       stale/duplicate tap) still needs the native "...Updating…" hint cleared and replaced
+       with the real current state - otherwise the notification is left stuck showing a
+       pending label for an action that has already been fully decided (and rejected). */
+    if(savedOk){render();resumeTickIfNeeded()}
     if(!savedOk)return; /* leave the native queue alone; retry next reconciliation */
     if(plugin.clearPendingActions)return Promise.resolve(plugin.clearPendingActions({upTo:maxSeq})).catch(function(){});
   }).catch(function(){});
@@ -844,7 +1046,8 @@ function drawSheet(){
   else if(s.type==='import')body=importHTML();
   else if(s.type==='finish')body=finishHTML();
   else if(s.type==='plan')body=planEditHTML();
-  else if(s.type==='planday')body=planDayHTML();
+  else if(s.type==='planweekday')body=planWeekdayHTML();
+  else if(s.type==='plantemplate')body=planTemplateHTML();
   else if(s.type==='planex')body=planExHTML();
   $('#sheet-root').innerHTML='<div class="scrim" data-act="scrim"><div class="sheet" role="dialog" aria-modal="true">'+body+'</div></div>';
   if(s.type==='add'&&s.sel)updatePreview();
@@ -882,7 +1085,7 @@ function settingsHTML(){
   '<button class="btn ghost full" style="margin-top:8px" data-act="savebaseline">Save baseline</button>'+
   '<h4 class="sh4">Workout plans</h4>'+
   (S.plans||[]).map(function(p){
-    return '<div class="listrow"><button class="grow planname" data-act="planactivate" data-id="'+p.id+'">'+(p.id===S.activePlanId?'&#9679;':'&#9675;')+' <b>'+esc(p.name)+'</b><div class="muted small">'+p.days.length+' day'+(p.days.length===1?'':'s')+(p.id===S.activePlanId?' &middot; active':'')+'</div></button>'+
+    return '<div class="listrow"><button class="grow planname" data-act="planactivate" data-id="'+p.id+'">'+(p.id===S.activePlanId?'&#9679;':'&#9675;')+' <b>'+esc(p.name)+'</b><div class="muted small">'+p.templates.length+' workout'+(p.templates.length===1?'':'s')+(p.id===S.activePlanId?' &middot; active':'')+'</div></button>'+
       '<button class="icon sm" data-act="planedit" data-id="'+p.id+'" aria-label="Edit '+esc(p.name)+'">&#9998;</button>'+
       '<button class="icon sm" data-act="plandup" data-id="'+p.id+'" aria-label="Duplicate '+esc(p.name)+'">&#10064;</button>'+
       (S.plans.length>1?'<button class="icon sm" data-act="plandel" data-id="'+p.id+'" aria-label="Delete '+esc(p.name)+'">&times;</button>':'')+
@@ -893,47 +1096,65 @@ function settingsHTML(){
   '<h4 class="sh4">Your data</h4><p class="muted small" style="margin:0 0 10px">Everything is stored on this phone only. Export a backup now and then, and always before you clear browser data or change phones.</p>'+
   '<div class="two"><button class="btn ghost" data-act="exportdata">Export backup</button><button class="btn ghost" data-act="importdata">Restore backup</button></div>'+
   '<button class="btn ghost full" style="margin-top:8px" data-act="recoversafety">Recover saved copies</button>'+
+  '<button class="btn ghost full" style="margin-top:8px" data-act="exportdiagnostics">Export diagnostic report</button>'+
   (isStandalone()?'':'<h4 class="sh4">Install</h4><p class="muted small" style="margin:0">'+(installEvt?'<button class="btn full" data-act="installapp">Install app</button>':'In Chrome or Samsung Internet, open the menu and choose Add to Home screen or Install app.')+'</p>');
 }
-var WEEKDAY_NAMES=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+var WEEKDAY_NAMES=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+var WEEKDAY_SHORT=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+var WEEK_ORDER=[1,2,3,4,5,6,0]; // display Mon..Sun, matching the app-wide convention and the user's own example schedule
 function planEditHTML(){
   var s=ui.sheet,plan=VShapeCore.findPlan(S.plans,s.planId);
   if(!plan)return '<div class="sh-h"><h3>Plan</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div><div class="empty">That plan no longer exists.</div>';
   var head='<div class="sh-h"><button class="icon" data-act="planback" aria-label="Back">&#8249;</button><h3>Edit plan</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div>'+
-    '<label class="fld" for="pl-name">Plan name<input id="pl-name" value="'+esc(plan.name)+'" data-planid="'+plan.id+'"></label>';
-  var days=plan.days.map(function(d,i){
-    var wds=(d.weekdays||[]).slice().sort().map(function(w){return WEEKDAY_NAMES[w]}).join(', ')||'Not scheduled';
-    return '<div class="listrow"><button class="grow planname" data-act="daysel" data-id="'+d.id+'"><b>'+esc(d.name)+'</b>'+(d.rest?' <span class="muted small">(rest)</span>':'')+'<div class="muted small">'+esc(wds)+(d.rest?'':' &middot; '+d.ex.length+' exercise'+(d.ex.length===1?'':'s'))+'</div></button>'+
-      (i>0?'<button class="icon sm" data-act="daymoveup" data-id="'+d.id+'" aria-label="Move '+esc(d.name)+' up">&uarr;</button>':'')+
-      (i<plan.days.length-1?'<button class="icon sm" data-act="daymovedown" data-id="'+d.id+'" aria-label="Move '+esc(d.name)+' down">&darr;</button>':'')+
-      '<button class="icon sm" data-act="daydel" data-id="'+d.id+'" aria-label="Delete '+esc(d.name)+'">&times;</button></div>';
+    '<label class="fld" for="pl-name">Plan name<input id="pl-name" value="'+esc(plan.name)+'" data-planid="'+plan.id+'"></label>'+
+    '<button class="chip'+(plan.flexible?' on':'')+'" style="margin-top:10px" data-act="planflexibletoggle" aria-pressed="'+!!plan.flexible+'">'+(plan.flexible?'Flexible schedule &#10003;':'Use a flexible schedule instead')+'</button>'+
+    '<div class="muted small" style="margin-top:6px">'+(plan.flexible?'No fixed weekdays - pick any workout each time you train.':'Fixed weekdays below. Turn this on if you train on no fixed schedule.')+'</div>';
+  var grid='';
+  if(!plan.flexible){
+    grid='<h4 class="sh4">Weekly schedule</h4>'+WEEK_ORDER.map(function(wd){
+      var ids=VShapeCore.scheduleSlot(plan,wd),names=ids.map(function(id){var t=VShapeCore.findTemplate(plan,id);return t?t.name:null}).filter(Boolean);
+      var label=names.length?names.join(' / '):'Rest';
+      return '<div class="listrow"><button class="grow planname" data-act="weekdaysel" data-wd="'+wd+'"><b>'+WEEKDAY_NAMES[wd]+'</b><div class="muted small">'+esc(label)+'</div></button></div>';
+    }).join('');
+  }
+  var templates=plan.templates.map(function(t){
+    return '<div class="listrow"><button class="grow planname" data-act="templatesel" data-id="'+t.id+'"><b>'+esc(t.name)+'</b><div class="muted small">'+(t.tag?esc(t.tag)+' &middot; ':'')+t.ex.length+' exercise'+(t.ex.length===1?'':'s')+'</div></button>'+
+      '<button class="icon sm" data-act="templatedel" data-id="'+t.id+'" aria-label="Delete '+esc(t.name)+'">&times;</button></div>';
   }).join('');
-  return head+'<h4 class="sh4">Days</h4>'+(days||'<div class="empty">No days yet. Add one below.</div>')+'<button class="btn ghost full" style="margin-top:8px" data-act="dayadd" data-planid="'+plan.id+'">+ Add day</button>';
+  return head+grid+'<h4 class="sh4">Workout templates</h4>'+(templates||'<div class="empty">No workout templates yet. Add one below, e.g. "Push A" or "Full Body".</div>')+'<button class="btn ghost full" style="margin-top:8px" data-act="templateadd" data-planid="'+plan.id+'">+ Add workout template</button>';
 }
-function planDayHTML(){
-  var s=ui.sheet,plan=VShapeCore.findPlan(S.plans,s.planId),day=plan&&VShapeCore.findPlanDay(plan,s.dayId);
-  if(!plan||!day)return '<div class="sh-h"><h3>Day</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div><div class="empty">That day no longer exists.</div>';
-  var head='<div class="sh-h"><button class="icon" data-act="daybacktoplan" aria-label="Back">&#8249;</button><h3>Edit day</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div>';
-  var wdChips='<div class="pills" role="group" aria-label="Scheduled on">'+WEEKDAY_NAMES.map(function(n,i){return '<button class="pill" data-act="daywd" data-wd="'+i+'" aria-pressed="'+((day.weekdays||[]).indexOf(i)>=0)+'">'+n+'</button>'}).join('')+'</div>';
-  var fields='<label class="fld" for="pd-name">Day name<input id="pd-name" value="'+esc(day.name)+'"></label>'+
-    '<label class="fld" for="pd-tag">Short description<input id="pd-tag" value="'+esc(day.tag||'')+'"></label>'+
-    '<label class="fld" for="pd-cue">Coaching cue<input id="pd-cue" value="'+esc(day.cue||'')+'"></label>'+
-    '<button class="chip'+(day.rest?' on':'')+'" style="margin-top:10px" data-act="daytogglerest" aria-pressed="'+!!day.rest+'">'+(day.rest?'Rest day &#10003;':'Mark as a rest day')+'</button>'+
-    '<h4 class="sh4">Scheduled on</h4>'+wdChips+
-    '<button class="btn full" style="margin-top:14px" data-act="daysave">Save day details</button>';
-  if(day.rest)return head+fields;
-  var exRows=day.ex.map(function(e,i){
+function planWeekdayHTML(){
+  var s=ui.sheet,plan=VShapeCore.findPlan(S.plans,s.planId);
+  if(!plan)return '<div class="sh-h"><h3>Weekday</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div><div class="empty">That plan no longer exists.</div>';
+  var wd=s.wd,selected=VShapeCore.scheduleSlot(plan,wd);
+  var head='<div class="sh-h"><button class="icon" data-act="weekdaybacktoplan" aria-label="Back">&#8249;</button><h3>'+WEEKDAY_NAMES[wd]+'</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div>'+
+    '<div class="muted small">Pick one or more workouts for '+WEEKDAY_NAMES[wd]+'. Picking none makes it a rest day. Picking more than one means you will be asked which one to do that day.</div>';
+  var rows=plan.templates.map(function(t){
+    var on=selected.indexOf(t.id)>=0;
+    return '<div class="listrow"><button class="grow planname" data-act="weekdaytoggle" data-wd="'+wd+'" data-id="'+t.id+'" aria-pressed="'+on+'">'+(on?'&#9679;':'&#9675;')+' '+esc(t.name)+'</button></div>';
+  }).join('');
+  return head+(rows||'<div class="empty">Add a workout template first, from the plan editor.</div>');
+}
+function planTemplateHTML(){
+  var s=ui.sheet,plan=VShapeCore.findPlan(S.plans,s.planId),t=plan&&VShapeCore.findTemplate(plan,s.dayId);
+  if(!plan||!t)return '<div class="sh-h"><h3>Workout</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div><div class="empty">That workout template no longer exists.</div>';
+  var head='<div class="sh-h"><button class="icon" data-act="templatebacktoplan" aria-label="Back">&#8249;</button><h3>Edit workout</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div>';
+  var fields='<label class="fld" for="pd-name">Workout name<input id="pd-name" value="'+esc(t.name)+'" placeholder="e.g. Chest &amp; Triceps"></label>'+
+    '<label class="fld" for="pd-tag">Short description<input id="pd-tag" value="'+esc(t.tag||'')+'"></label>'+
+    '<label class="fld" for="pd-cue">Coaching cue<input id="pd-cue" value="'+esc(t.cue||'')+'"></label>'+
+    '<button class="btn full" style="margin-top:14px" data-act="templatesave">Save workout details</button>';
+  var exRows=t.ex.map(function(e,i){
     return '<div class="listrow"><div class="grow"><b>'+esc(e.name)+'</b><div class="muted small">'+esc(e.muscle||'')+' &middot; '+e.sets+' x '+e.lo+'&ndash;'+e.hi+(e.timed?'s':'')+' &middot; rest '+e.rest+'s</div></div>'+
       (i>0?'<button class="icon sm" data-act="exmoveup" data-id="'+e.id+'" aria-label="Move '+esc(e.name)+' up">&uarr;</button>':'')+
-      (i<day.ex.length-1?'<button class="icon sm" data-act="exmovedown" data-id="'+e.id+'" aria-label="Move '+esc(e.name)+' down">&darr;</button>':'')+
+      (i<t.ex.length-1?'<button class="icon sm" data-act="exmovedown" data-id="'+e.id+'" aria-label="Move '+esc(e.name)+' down">&darr;</button>':'')+
       '<button class="icon sm" data-act="exedit" data-id="'+e.id+'" aria-label="Edit '+esc(e.name)+'">&#9998;</button>'+
       '<button class="icon sm" data-act="exremove" data-id="'+e.id+'" aria-label="Remove '+esc(e.name)+'">&times;</button></div>';
   }).join('');
   return head+fields+'<h4 class="sh4">Exercises</h4>'+(exRows||'<div class="empty">No exercises yet.</div>')+'<button class="btn ghost full" style="margin-top:8px" data-act="exadd">+ Add exercise</button>';
 }
 function planExHTML(){
-  var s=ui.sheet,plan=VShapeCore.findPlan(S.plans,s.planId),day=plan&&VShapeCore.findPlanDay(plan,s.dayId);
-  if(!plan||!day)return '<div class="sh-h"><h3>Exercise</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div><div class="empty">That day no longer exists.</div>';
+  var s=ui.sheet,plan=VShapeCore.findPlan(S.plans,s.planId),day=plan&&VShapeCore.findTemplate(plan,s.dayId);
+  if(!plan||!day)return '<div class="sh-h"><h3>Exercise</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div><div class="empty">That workout template no longer exists.</div>';
   var head='<div class="sh-h"><button class="icon" data-act="exbacktoday" aria-label="Back">&#8249;</button><h3>'+(s.exId?'Edit exercise':'Add exercise')+'</h3><button class="icon" data-act="closesheet" aria-label="Close">&times;</button></div>';
   if(!s.exId&&!s.custom){
     var lib=allKnownExercises(),inThisDay=day.ex.map(function(e){return e.id});
@@ -978,7 +1199,22 @@ function drawTimer(){
   tickFn();
 }
 function kickTimer(){drawTimer();if(!tick)tick=setInterval(tickFn,500)}
-function resumeTickIfNeeded(){var s=getOpenSessionAnywhere();if(s&&s.rest){drawTimer();if(!tick)tick=setInterval(tickFn,500)}}
+/* Called on boot AND every time the app becomes visible again (see the
+   visibilitychange listener below). The WebView can throttle or fully
+   suspend setInterval while backgrounded/minimised without ever clearing
+   it, so `tick` can be a dead, stale interval id by the time we come back -
+   checking "is tick already set" is not enough to know it is still
+   actually firing. Unconditionally clearing and recreating it here (rather
+   than the old if(!tick) guard) is what fixes the countdown staying frozen
+   after minimising and reopening the app: drawTimer() always recomputes
+   the displayed time from the deadline fresh, right now, and a live
+   interval is guaranteed to be running afterwards whenever rest is
+   actually in progress. */
+function resumeTickIfNeeded(){
+  var s=getOpenSessionAnywhere();
+  clearInterval(tick);tick=null;
+  if(s&&s.rest){drawTimer();tick=setInterval(tickFn,500)}
+}
 function tickFn(){
   var s=getOpenSessionAnywhere(),rest=s&&s.rest;
   if(!rest){clearInterval(tick);tick=null;return}
@@ -1000,9 +1236,9 @@ function addEntry(day,meal,f,qty){
 }
 var A={
   tab:function(t){ui.tab=t.dataset.tab;render();window.scrollTo(0,0)},
-  dprev:function(){ui.date=addDays(ui.date,-1);ui.wd=null;render()},
-  dnext:function(){if(ui.date<todayISO()){ui.date=addDays(ui.date,1);ui.wd=null;render()}},
-  dtoday:function(){ui.date=todayISO();ui.wd=null;render()},
+  dprev:function(){ui.date=addDays(ui.date,-1);ui.wd=null;ui.trainPicker=false;render()},
+  dnext:function(){if(ui.date<todayISO()){ui.date=addDays(ui.date,1);ui.wd=null;ui.trainPicker=false;render()}},
+  dtoday:function(){ui.date=todayISO();ui.wd=null;ui.trainPicker=false;render()},
   stepadd:function(t){var d=ensureDay(ui.date);d.steps=Math.max(0,(d.steps||0)+Number(t.dataset.n));d.stepsSource='manual';saveDay(ui.date);render()},
   stepset:function(){
     var v=VShapeCore.sanitizeStepCount(($('#stepsIn')||{}).value);
@@ -1013,7 +1249,7 @@ var A={
   importsteps:function(){$('#csvIn').click()},
   hcsync:function(){ui.hcBusy||hcSync(30,false)},
   wateradd:function(t){var d=ensureDay(ui.date);d.water=Math.max(0,(d.water||0)+Number(t.dataset.n));saveDay(ui.date);try{navigator.vibrate&&navigator.vibrate(10)}catch(e){}render()},
-  gotod:function(t){ui.date=t.dataset.d;ui.wd=null;render()},
+  gotod:function(t){ui.date=t.dataset.d;ui.wd=null;ui.trainPicker=false;render()},
   wlog:function(){
     var v=VShapeCore.sanitizeBodyWeightKg(String(($('#wIn')||{}).value).replace(',','.'));
     if(v==null){toast('Enter your weight in kg');return}
@@ -1052,64 +1288,63 @@ var A={
     S.activePlanId=t.dataset.id;ui.wd=null;saveLocal();drawSheet();render();toast('Active plan set');
   },
   planback:function(){openSheet({type:'settings'})},
-  dayadd:function(t){
-    var plan=VShapeCore.findPlan(S.plans,t.dataset.planid);if(!plan)return;
-    var day=VShapeCore.newPlanDay('New day',Date.now());
-    VShapeCore.addDayToPlan(plan,day);saveLocal();
-    openSheet({type:'planday',planId:plan.id,dayId:day.id});
-  },
-  daysel:function(t){openSheet({type:'planday',planId:ui.sheet.planId,dayId:t.dataset.id})},
-  daymoveup:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId);if(plan&&VShapeCore.moveDayInPlan(plan,t.dataset.id,-1)){saveLocal();drawSheet()}},
-  daymovedown:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId);if(plan&&VShapeCore.moveDayInPlan(plan,t.dataset.id,1)){saveLocal();drawSheet()}},
-  daydel:function(t){
+  planflexibletoggle:function(){
     var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId);if(!plan)return;
-    VShapeCore.removeDayFromPlan(plan,t.dataset.id);saveLocal();drawSheet();toast('Day deleted');
+    plan.flexible=!plan.flexible;saveLocal();drawSheet();render();
   },
-  daybacktoplan:function(){openSheet({type:'plan',planId:ui.sheet.planId})},
-  daytogglerest:function(){
-    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
-    if(!day)return;
-    day.rest=!day.rest;saveLocal();drawSheet();
+  templateadd:function(t){
+    var plan=VShapeCore.findPlan(S.plans,t.dataset.planid);if(!plan)return;
+    var tpl=VShapeCore.newTemplate('New workout',Date.now());
+    VShapeCore.addTemplateToPlan(plan,tpl);saveLocal();
+    openSheet({type:'plantemplate',planId:plan.id,dayId:tpl.id});
   },
-  daywd:function(t){
-    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
-    if(!day)return;
-    var wd=Number(t.dataset.wd),idx=(day.weekdays||[]).indexOf(wd);
-    if(idx>=0)day.weekdays.splice(idx,1);else(day.weekdays=day.weekdays||[]).push(wd);
-    saveLocal();drawSheet();
+  templatesel:function(t){openSheet({type:'plantemplate',planId:ui.sheet.planId,dayId:t.dataset.id})},
+  templatedel:function(t){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId);if(!plan)return;
+    VShapeCore.removeTemplateFromPlan(plan,t.dataset.id);saveLocal();drawSheet();render();toast('Workout template deleted');
   },
-  daysave:function(){
-    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
-    if(!day)return;
+  templatebacktoplan:function(){openSheet({type:'plan',planId:ui.sheet.planId})},
+  templatesave:function(){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),t=plan&&VShapeCore.findTemplate(plan,ui.sheet.dayId);
+    if(!t)return;
     var name=$('#pd-name').value.trim();
-    if(!name){toast('Give the day a name');return}
-    day.name=name;day.tag=$('#pd-tag').value.trim();day.cue=$('#pd-cue').value.trim();
-    saveLocal();drawSheet();toast('Day saved');
+    if(!name){toast('Give the workout a name');return}
+    t.name=name;t.tag=$('#pd-tag').value.trim();t.cue=$('#pd-cue').value.trim();
+    saveLocal();drawSheet();render();toast('Workout saved');
+  },
+  weekdaysel:function(t){openSheet({type:'planweekday',planId:ui.sheet.planId,wd:Number(t.dataset.wd)})},
+  weekdaybacktoplan:function(){openSheet({type:'plan',planId:ui.sheet.planId})},
+  weekdaytoggle:function(t){
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId);if(!plan)return;
+    var wd=Number(t.dataset.wd),id=t.dataset.id,cur=VShapeCore.scheduleSlot(plan,wd),idx=cur.indexOf(id);
+    var next=idx>=0?cur.filter(function(x){return x!==id}):cur.concat([id]);
+    VShapeCore.setWeekdayTemplates(plan,wd,next);
+    saveLocal();drawSheet();render();
   },
   exadd:function(){ui.sheet=Object.assign(ui.sheet,{type:'planex',exId:null,custom:false,flags:{}});drawSheet()},
   exedit:function(t){
-    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findTemplate(plan,ui.sheet.dayId);
     var ex=day&&day.ex.filter(function(e){return e.id===t.dataset.id})[0];if(!ex)return;
     ui.sheet=Object.assign(ui.sheet,{type:'planex',exId:ex.id,custom:true,flags:{bw:!!ex.bw,assisted:!!ex.assisted,timed:!!ex.timed}});
     drawSheet();
   },
-  exmoveup:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);if(day&&VShapeCore.moveExerciseInDay(day,t.dataset.id,-1)){saveLocal();drawSheet()}},
-  exmovedown:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);if(day&&VShapeCore.moveExerciseInDay(day,t.dataset.id,1)){saveLocal();drawSheet()}},
+  exmoveup:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findTemplate(plan,ui.sheet.dayId);if(day&&VShapeCore.moveExerciseInTemplate(day,t.dataset.id,-1)){saveLocal();drawSheet()}},
+  exmovedown:function(t){var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findTemplate(plan,ui.sheet.dayId);if(day&&VShapeCore.moveExerciseInTemplate(day,t.dataset.id,1)){saveLocal();drawSheet()}},
   exremove:function(t){
-    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
-    if(day&&VShapeCore.removeExerciseFromDay(day,t.dataset.id)){saveLocal();drawSheet()}
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findTemplate(plan,ui.sheet.dayId);
+    if(day&&VShapeCore.removeExerciseFromTemplate(day,t.dataset.id)){saveLocal();drawSheet()}
   },
-  exbacktoday:function(){openSheet({type:'planday',planId:ui.sheet.planId,dayId:ui.sheet.dayId})},
+  exbacktoday:function(){openSheet({type:'plantemplate',planId:ui.sheet.planId,dayId:ui.sheet.dayId})},
   exnewcustom:function(){ui.sheet.custom=true;ui.sheet.flags={};drawSheet()},
   explpick:function(t){
-    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findTemplate(plan,ui.sheet.dayId);
     var lib=allKnownExercises(),src=lib[t.dataset.id];if(!day||!src)return;
-    VShapeCore.addExerciseToDay(day,Object.assign({},src));
-    saveLocal();openSheet({type:'planday',planId:plan.id,dayId:day.id});toast('Added '+src.name);
+    VShapeCore.addExerciseToTemplate(day,Object.assign({},src));
+    saveLocal();openSheet({type:'plantemplate',planId:plan.id,dayId:day.id});toast('Added '+src.name);
   },
   extoggle:function(t){ui.sheet.flags=ui.sheet.flags||{};var f=t.dataset.f;ui.sheet.flags[f]=!ui.sheet.flags[f];drawSheet()},
   exsave:function(t){
-    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findPlanDay(plan,ui.sheet.dayId);
+    var plan=VShapeCore.findPlan(S.plans,ui.sheet.planId),day=plan&&VShapeCore.findTemplate(plan,ui.sheet.dayId);
     if(!day)return;
     var name=$('#ex-name').value.trim(),sets=parseInt($('#ex-sets').value,10),lo=parseInt($('#ex-lo').value,10),hi=parseInt($('#ex-hi').value,10),rest=parseInt($('#ex-rest').value,10);
     var start=parseFloat($('#ex-start').value),inc=parseFloat($('#ex-inc').value),muscle=$('#ex-muscle').value.trim(),cue=$('#ex-cue').value.trim();
@@ -1117,15 +1352,15 @@ var A={
     var flags=ui.sheet.flags||{};
     var exId=t.dataset.id||(uid()+'-ex');
     var def={id:exId,name:name,sets:sets,lo:lo,hi:hi,rest:rest,inc:isNaN(inc)?0:inc,start:isNaN(start)?0:start,muscle:muscle,cue:cue,bw:!!flags.bw,assisted:!!flags.assisted,timed:!!flags.timed};
-    if(t.dataset.id){VShapeCore.substituteExerciseInDay(day,t.dataset.id,def)}
-    else{VShapeCore.addExerciseToDay(day,def)}
-    saveLocal();openSheet({type:'planday',planId:plan.id,dayId:day.id});toast('Exercise saved');
+    if(t.dataset.id){VShapeCore.substituteExerciseInTemplate(day,t.dataset.id,def)}
+    else{VShapeCore.addExerciseToTemplate(day,def)}
+    saveLocal();openSheet({type:'plantemplate',planId:plan.id,dayId:day.id});toast('Exercise saved');
   },
   requestworkoutnotif:function(){
     var plugin=wnPlugin();
     if(!plugin){toast('Workout notifications need the Android app');return}
     Promise.resolve(plugin.requestPermission?plugin.requestPermission():{status:'unknown'}).then(function(res){
-      S.profile.notifPermission=(res&&res.status)||'unknown';saveProfile();render();
+      S.profile.notifPermission=(res&&res.status)||'unknown';saveProfile();render();drawSheet();
       toast(S.profile.notifPermission==='granted'?'Workout notifications are on':'Notifications are off. The workout still tracks fine in the app.');
     }).catch(function(){toast('Could not reach the notification permission')});
   },
@@ -1161,9 +1396,32 @@ var A={
   },
   wd:function(t){ui.wd=t.dataset.k;render()},
   startworkout:function(){
-    var r=startOrGetSession(ui.date,curWd());
+    var key=curWd();
+    if(key==='rest'||key==='choose'){toast('Pick a workout first');return}
+    var r=startOrGetSession(ui.date,key);
     if(r.blocked){toast('Finish or pause your current workout first');return}
     saveDay(ui.date);render();
+  },
+  /* Date-specific rest/skip/train-anyway overrides (see core.js's applyDayOverride): never a
+     session, never a PR, never a change to the recurring weekly schedule - just how this one
+     calendar date resolves. All undoable via undooverride. */
+  resttoday:function(){
+    var d=ensureDay(ui.date);d.override={type:'rest',reason:'rest'};
+    ui.wd=null;ui.trainPicker=false;saveDay(ui.date);render();toast('Marked as rest today');
+  },
+  skipworkout:function(){
+    var d=ensureDay(ui.date);d.override={type:'rest',reason:'skip'};
+    ui.wd=null;ui.trainPicker=false;saveDay(ui.date);render();toast('Workout skipped for today');
+  },
+  skiprestopen:function(){ui.trainPicker=true;render()},
+  skiprestclose:function(){ui.trainPicker=false;render()},
+  traininstead:function(t){
+    var d=ensureDay(ui.date);d.override={type:'train',templateId:t.dataset.k};
+    ui.wd=null;ui.trainPicker=false;saveDay(ui.date);render();
+  },
+  undooverride:function(){
+    var d=ensureDay(ui.date);d.override=null;
+    ui.wd=null;ui.trainPicker=false;saveDay(ui.date);render();toast('Undone');
   },
   pauseworkout:function(){
     var s=getOpenSessionAnywhere();if(!s)return;
@@ -1187,7 +1445,9 @@ var A={
   },
   logset:function(t){
     var row=t.closest('.set'),exId=row.dataset.ex,i=Number(row.dataset.i);
-    var r=startOrGetSession(ui.date,curWd());
+    var key=curWd();
+    if(key==='rest'||key==='choose'){toast('Pick a workout first');return}
+    var r=startOrGetSession(ui.date,key);
     if(r.blocked){toast('Finish or pause your current workout first');return}
     var session=r.session,ex=(session.exSnapshot||[]).filter(function(e){return e.id===exId})[0];
     if(!ex){toast('That exercise is no longer in this workout');return}
@@ -1246,17 +1506,44 @@ var A={
       });
     }).catch(function(){toast('Restore failed; your existing data was kept.')});
   },
+  /* Recovers EVERY safety copy this device has ever kept, from BOTH places one can exist:
+     localStorage's own pre-migration backups (written by loadLocal right before any
+     schema upgrade touches the live data) and the IndexedDB 'safety' store (idbPutSafety) -
+     which, before this fix, was write-only: nothing ever read it back, so a device that lost
+     its localStorage copy but still had an IndexedDB one had no way to recover it. */
   recoversafety:function(){
     var found=[];
     try{for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);if(k&&k.indexOf(LS+'-pre-migration-backup-')===0)found.push(k)}}catch(e){}
-    if(!found.length){toast('No saved copies were found on this device');return}
-    found.sort();
-    var combined={app:'vshape-tracker-safety-export',copies:found.map(function(k){try{return JSON.parse(localStorage.getItem(k))}catch(e){return null}})};
-    var blob=new Blob([JSON.stringify(combined)],{type:'application/json'}),a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);a.download='vshape-safety-copies-'+todayISO()+'.json';
-    document.body.appendChild(a);a.click();
-    setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1500);
-    toast('Downloaded '+found.length+' saved copy(ies)');
+    var lsCopies=found.sort().map(function(k){try{return {source:'localStorage',key:k,raw:JSON.parse(localStorage.getItem(k))}}catch(e){return {source:'localStorage',key:k,raw:null,unreadable:true}}});
+    idbRun('safety','readonly',function(s){return s.getAll()}).then(function(list){return list||[]}).catch(function(){return []}).then(function(idbList){
+      var idbCopies=idbList.map(function(e){
+        var raw=null,unreadable=false;
+        try{raw=typeof e.raw==='string'?JSON.parse(e.raw):e.raw}catch(err){unreadable=true}
+        return {source:'indexedDB',ts:e.ts,raw:raw,unreadable:unreadable};
+      });
+      var all=lsCopies.concat(idbCopies);
+      if(!all.length){toast('No saved copies were found on this device');return}
+      var combined={app:'vshape-tracker-safety-export',exportedAt:new Date().toISOString(),copies:all};
+      var blob=new Blob([JSON.stringify(combined)],{type:'application/json'}),a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);a.download='vshape-safety-copies-'+todayISO()+'.json';
+      document.body.appendChild(a);a.click();
+      setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1500);
+      toast('Downloaded '+all.length+' saved copy(ies)');
+    });
+  },
+  /* A redacted structural report for diagnosing data-loss/sync reports without exporting the
+     user's actual food/weight/photo data: counts and ids only (schema state, per-day session
+     counts, every logged set's exId/index/w/r so a support thread can see exactly what is and
+     is not present), plus whatever the native side still has pending/cached. Never silently
+     fixes or clears anything - purely read-only. */
+  exportdiagnostics:function(){
+    buildDiagnosticReport().then(function(report){
+      var blob=new Blob([JSON.stringify(report,null,2)],{type:'application/json'}),a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);a.download='vshape-diagnostics-'+todayISO()+'.json';
+      document.body.appendChild(a);a.click();
+      setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1500);
+      toast('Diagnostic report saved to your downloads');
+    });
   },
   installapp:function(){
     if(!installEvt)return;
@@ -1381,6 +1668,7 @@ resumeTickIfNeeded();
 if(isNative()&&!S.locked)setTimeout(function(){hcSync(7,true);reconcileNativeActions()},800);
 document.addEventListener('visibilitychange',function(){
   if(document.hidden||S.locked)return;
+  resumeTickIfNeeded(); /* the rest countdown must reflect reality the instant we're back, not stay frozen on whatever was last drawn before we were minimised */
   if(isNative()){
     reconcileNativeActions();
     if(!ui.hcAt||Date.now()-ui.hcAt>10*60000)hcSync(3,true);

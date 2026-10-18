@@ -173,42 +173,89 @@
   }
 
   /* ---------- workout plans (custom plan builder) ---------- */
-  // A Plan is {id, name, days:[DayDef]}. A DayDef is
-  // {id, name, tag, cue, rest:boolean, weekdays:[0..6], ex:[ExDef]} where ExDef
-  // is the same shape the app already used for program-day exercises
-  // (id,name,sets,lo,hi,rest,inc,start,muscle,cue,bw,assisted,timed). Sessions
-  // snapshot a day's ex array at creation time (newSession's exSnapshot), so
-  // editing or deleting a plan later never changes how an already-started or
-  // already-finished session is displayed or counted.
-  function newPlan(name, now) { return { id: genId(now), name: name || 'New plan', days: [] }; }
-  function newPlanDay(name, now) { return { id: genId(now) + '-d', name: name || 'New day', tag: '', cue: '', rest: false, weekdays: [], ex: [] }; }
+  // A Plan is {id, name, flexible:boolean, schedule:{0..6:[templateId]}, templates:[Template]}.
+  // A Template (e.g. "Push A", "Chest & Triceps") is {id, name, tag, cue, ex:[ExDef]} - a
+  // reusable, named workout; weekday scheduling is NOT stored on the template, only in the
+  // plan's `schedule` map, so the same template id can be assigned to any number of weekdays
+  // (Mon/Thu full body, say) without duplicating its exercise definitions. `schedule[weekday]`
+  // is always an array of template ids: [] means a rest day, a single id means that template
+  // trains that weekday, and more than one id means the user must explicitly choose which one
+  // when they open Train that day (never silently the first). `flexible:true` means the plan
+  // has no fixed weekdays at all - every day offers the full template list to choose from.
+  // ExDef is the same shape the app already used for program exercises
+  // (id,name,sets,lo,hi,rest,inc,start,muscle,cue,bw,assisted,timed). Sessions snapshot a
+  // template's ex array at creation time (newSession's exSnapshot), so editing or deleting a
+  // plan/template later never changes how an already-started or already-finished session is
+  // displayed or counted.
+  function emptySchedule() { return { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] }; }
+  function newPlan(name, now) { return { id: genId(now), name: name || 'New plan', flexible: false, schedule: emptySchedule(), templates: [] }; }
+  function newTemplate(name, now) { return { id: genId(now) + '-t', name: name || 'New workout', tag: '', cue: '', ex: [] }; }
   function findPlan(plans, id) { return (plans || []).filter(function (p) { return p.id === id; })[0] || null; }
-  function findPlanDay(plan, dayId) { return ((plan && plan.days) || []).filter(function (d) { return d.id === dayId; })[0] || null; }
-  function planDayForWeekday(plan, weekday) {
-    var days = (plan && plan.days) || [];
-    for (var i = 0; i < days.length; i++) {
-      if (!days[i].rest && (days[i].weekdays || []).indexOf(weekday) >= 0) return days[i];
-    }
-    return null;
+  function findTemplate(plan, templateId) { return ((plan && plan.templates) || []).filter(function (t) { return t.id === templateId; })[0] || null; }
+  // Always returns an array (never null/undefined), even for a weekday never touched by
+  // setWeekdayTemplates, so callers never need to null-check before reading .length.
+  function scheduleSlot(plan, weekday) {
+    return (plan && plan.schedule && plan.schedule[weekday]) || [];
+  }
+  function setWeekdayTemplates(plan, weekday, templateIds) {
+    if (!plan.schedule) plan.schedule = emptySchedule();
+    // De-duplicate defensively; a UI bug or double-tap should never let the same template
+    // appear twice in one weekday's options.
+    var seen = {}, out = [];
+    (templateIds || []).forEach(function (id) { if (id && !seen[id]) { seen[id] = true; out.push(id); } });
+    plan.schedule[weekday] = out;
+    return out;
+  }
+  // The resolved outcome of opening Train on a given weekday: 'rest' (nothing scheduled),
+  // a single template id (exactly one option - never ambiguous), or {choose:[ids]} when more
+  // than one template is scheduled and the app must ask instead of silently picking one.
+  function resolveWeekday(plan, weekday) {
+    var slot = plan && plan.flexible ? (plan.templates || []).map(function (t) { return t.id; }) : scheduleSlot(plan, weekday);
+    if (!slot.length) return { kind: 'rest' };
+    if (slot.length === 1) return { kind: 'template', templateId: slot[0] };
+    return { kind: 'choose', options: slot.slice() };
   }
   function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
+
+  // A date-specific override on top of whatever the recurring weekly schedule says for that
+  // date: {type:'rest'} forces that one date to show/behave as a rest day regardless of what
+  // is normally scheduled (covers both "Rest Today" on a scheduled workout day and the
+  // explicit "Rest Today" confirmation on an already-scheduled rest day); {type:'train',
+  // templateId} forces training on an otherwise-rest date with a specific chosen template
+  // ("Skip Rest & Train"). It is purely a display/routing decision for ONE calendar date -
+  // never a session, never a PR, and never a change to the recurring Mon..Sun schedule itself
+  // (that still lives on the plan). `resolution` is whatever resolveWeekday() already
+  // returned for that weekday; a null/missing override returns it untouched.
+  function applyDayOverride(resolution, override) {
+    if (!override) return resolution;
+    if (override.type === 'rest') return { kind: 'rest' };
+    if (override.type === 'train' && override.templateId) return { kind: 'template', templateId: override.templateId };
+    return resolution;
+  }
 
   function createPlan(plans, name, now) {
     var p = newPlan(name, now);
     plans.push(p);
     return p;
   }
-  // Duplicating a plan keeps every exercise id unchanged (so progression
-  // history and PR tracking for "the same real exercise" keep working across
-  // the copy), but gives the plan itself and every day inside it a fresh id,
-  // so editing the copy can never alter the original.
+  // Duplicating a plan keeps every exercise id unchanged (so progression history and PR
+  // tracking for "the same real exercise" keep working across the copy), but gives the plan
+  // itself and every template inside it a fresh id, so editing the copy can never alter the
+  // original, and re-points the copied schedule at the copied templates' new ids.
   function duplicatePlan(plans, planId, newName, now) {
     var src = findPlan(plans, planId);
     if (!src) return null;
     var copy = deepClone(src);
     copy.id = genId(now) + '-dup';
     copy.name = newName || (src.name + ' (copy)');
-    copy.days.forEach(function (d) { d.id = genId(now) + '-d-' + Math.random().toString(36).slice(2, 6); });
+    var idMap = {};
+    copy.templates.forEach(function (t) {
+      var newId = genId(now) + '-t-' + Math.random().toString(36).slice(2, 6);
+      idMap[t.id] = newId; t.id = newId;
+    });
+    Object.keys(copy.schedule || {}).forEach(function (wd) {
+      copy.schedule[wd] = (copy.schedule[wd] || []).map(function (id) { return idMap[id] || id; });
+    });
     plans.push(copy);
     return copy;
   }
@@ -223,46 +270,68 @@
     if (activePlanId === planId) return { ok: true, removed: true, newActivePlanId: plans[0].id };
     return { ok: true, removed: true };
   }
-  function addDayToPlan(plan, dayDef) { plan.days.push(dayDef); return dayDef; }
-  function removeDayFromPlan(plan, dayId) {
-    var idx = plan.days.findIndex(function (d) { return d.id === dayId; });
+  function addTemplateToPlan(plan, template) { plan.templates.push(template); return template; }
+  // Removing a template also strips it out of every weekday it was scheduled on, so the
+  // schedule never holds a dangling reference to a template that no longer exists; any
+  // weekday left with zero options simply becomes a rest day.
+  function removeTemplateFromPlan(plan, templateId) {
+    var idx = plan.templates.findIndex(function (t) { return t.id === templateId; });
     if (idx < 0) return false;
-    plan.days.splice(idx, 1);
+    plan.templates.splice(idx, 1);
+    Object.keys(plan.schedule || {}).forEach(function (wd) {
+      plan.schedule[wd] = (plan.schedule[wd] || []).filter(function (id) { return id !== templateId; });
+    });
     return true;
   }
-  function moveDayInPlan(plan, dayId, delta) {
-    var idx = plan.days.findIndex(function (d) { return d.id === dayId; });
-    if (idx < 0) return false;
-    var to = idx + delta;
-    if (to < 0 || to >= plan.days.length) return false;
-    var tmp = plan.days[idx]; plan.days[idx] = plan.days[to]; plan.days[to] = tmp;
-    return true;
-  }
-  function addExerciseToDay(day, exDef, index) {
+  function addExerciseToTemplate(template, exDef, index) {
     if (!exDef.id) exDef.id = genId(Date.now()) + '-ex';
-    if (index == null || index > day.ex.length) day.ex.push(exDef);
-    else day.ex.splice(index, 0, exDef);
+    if (index == null || index > template.ex.length) template.ex.push(exDef);
+    else template.ex.splice(index, 0, exDef);
     return exDef;
   }
-  function removeExerciseFromDay(day, exId) {
-    var idx = day.ex.findIndex(function (e) { return e.id === exId; });
+  function removeExerciseFromTemplate(template, exId) {
+    var idx = template.ex.findIndex(function (e) { return e.id === exId; });
     if (idx < 0) return false;
-    day.ex.splice(idx, 1);
+    template.ex.splice(idx, 1);
     return true;
   }
-  function moveExerciseInDay(day, exId, delta) {
-    var idx = day.ex.findIndex(function (e) { return e.id === exId; });
+  function moveExerciseInTemplate(template, exId, delta) {
+    var idx = template.ex.findIndex(function (e) { return e.id === exId; });
     if (idx < 0) return false;
     var to = idx + delta;
-    if (to < 0 || to >= day.ex.length) return false;
-    var tmp = day.ex[idx]; day.ex[idx] = day.ex[to]; day.ex[to] = tmp;
+    if (to < 0 || to >= template.ex.length) return false;
+    var tmp = template.ex[idx]; template.ex[idx] = template.ex[to]; template.ex[to] = tmp;
     return true;
   }
-  function substituteExerciseInDay(day, exId, newExDef) {
-    var idx = day.ex.findIndex(function (e) { return e.id === exId; });
+  function substituteExerciseInTemplate(template, exId, newExDef) {
+    var idx = template.ex.findIndex(function (e) { return e.id === exId; });
     if (idx < 0) return false;
-    day.ex[idx] = newExDef;
+    template.ex[idx] = newExDef;
     return true;
+  }
+  // Upgrades a plan from the previous shape (days:[{id,name,tag,cue,rest,weekdays,ex}],
+  // no templates/schedule) into the current one, in place, idempotently. A plan already on
+  // the current shape (has `templates`) is returned untouched. Every old day becomes a
+  // template with the SAME id (critical: existing sessions' dayId/day already point at that
+  // exact id - this is the same reasoning as the earlier fix that keeps the seeded default
+  // plan's ids equal to the pre-plans literal program keys, applied one layer up) and its
+  // weekdays become schedule entries; an old rest day never had an "Add exercise" control in
+  // the UI, so it can only ever have an empty ex list and becomes an empty schedule slot
+  // instead of a template - nothing is lost either way.
+  function migratePlanShape(plan) {
+    if (!plan || plan.templates) return plan;
+    var templates = [], schedule = emptySchedule();
+    (plan.days || []).forEach(function (d) {
+      if (!d.rest) {
+        templates.push({ id: d.id, name: d.name, tag: d.tag || '', cue: d.cue || '', ex: d.ex || [] });
+        (d.weekdays || []).forEach(function (wd) { schedule[wd] = (schedule[wd] || []).concat([d.id]); });
+      }
+    });
+    plan.templates = templates;
+    plan.schedule = schedule;
+    plan.flexible = !!plan.flexible;
+    delete plan.days;
+    return plan;
   }
 
   // Sums logged-set volume (kg, excluding timed/bodyweight-only sets, same
@@ -316,6 +385,15 @@
   }
 
   /* ---------- action-queue reconciliation (native notification -> app state) ---------- */
+  // 'logset' actions carry the exact displayed weight/reps the lifter tapped "Log Set" on
+  // (exId, index, w, r). They are validated against the session's own frozen exSnapshot (never
+  // a live, possibly-since-edited plan), and a set index that is already logged is skipped as
+  // 'set-already-logged' - a SEPARATE check from the seq-staleness one above it, because two
+  // distinct queued actions (different seq - e.g. a slow double-tap before the button
+  // disabled) can both target the same set index. Without this, the second one would silently
+  // overwrite an already-recorded set instead of being a no-op. A successful log also starts
+  // the matching rest timer in the SAME reconciled step, so "logged but rest never started"
+  // can never happen from a partially-applied action.
   function reconcileActions(session, actions, now) {
     now = isFiniteNumber(now) ? now : Date.now();
     var applied = [], skipped = [];
@@ -330,6 +408,20 @@
         case 'pause': pauseSession(session, ts); break;
         case 'resume': resumeSession(session, ts); break;
         case 'skip-rest': skipRest(session); break;
+        case 'pause-rest': pauseRest(session, ts); break;
+        case 'resume-rest': resumeRest(session, ts); break;
+        case 'logset':
+          var exMap = {};
+          (session.exSnapshot || []).forEach(function (e) { exMap[e.id] = e; });
+          var ex = exMap[a.exId];
+          if (!ex) { skipped.push({ action: a, reason: 'unknown-exercise' }); return; }
+          if (!isFiniteNumber(a.index) || a.index < 0) { skipped.push({ action: a, reason: 'bad-index' }); return; }
+          if (session.log[a.exId] && session.log[a.exId][a.index]) { skipped.push({ action: a, reason: 'set-already-logged' }); return; }
+          var res = logSetIntoSession(session, ex, a.index, { w: a.w, r: a.r });
+          if (!res.ok) { skipped.push({ action: a, reason: 'invalid-set-' + res.reason }); return; }
+          startRest(session, ex, ts);
+          break;
+        case 'finish': finishSession(session, ts); break;
         default: skipped.push({ action: a, reason: 'unknown-type' }); return;
       }
       session.lastAppliedSeq = a.seq;
@@ -340,6 +432,45 @@
 
   function shouldShowNotification(session) {
     return !!session && (session.status === 'active' || session.status === 'paused');
+  }
+
+  /* ---------- notification state machine ---------- */
+  // Derives a single display/control state for the live workout notification from the
+  // session's existing, already-authoritative fields - no new state is stored, this is a pure
+  // read. 'exercise_complete' means every exercise in the workout has all its sets logged
+  // (ready to finish), not just the current one - that is the actionable moment the
+  // notification should prompt for, distinct from 'resting' (which already covers the
+  // in-between-sets pause the name might otherwise suggest).
+  function notificationState(session, programDay) {
+    if (!session) return 'workout_finished';
+    if (session.status === 'finished') return 'workout_finished';
+    if (session.status === 'paused') return 'workout_paused';
+    if (session.rest) return session.rest.paused ? 'rest_paused' : 'resting';
+    var sd = sessionSetsDone(session, programDay);
+    if (sd.total > 0 && sd.done >= sd.total) return 'exercise_complete';
+    return 'ready';
+  }
+  // The next not-yet-logged set, in program order: {exIndex, exId, setIndex}, or null once
+  // every set in the workout is logged (exercise_complete).
+  function nextPendingSet(session, programDay) {
+    var list = pendingSetsList(session, programDay);
+    return list.length ? list[0] : null;
+  }
+  // Every not-yet-logged set in the whole workout, in program order. This is what lets a
+  // caller (the native notification, specifically) walk through an entire remaining workout
+  // using only a session's exSnapshot plus whatever has been logged so far - it does not need
+  // history or progression logic, just "what's left".
+  function pendingSetsList(session, programDay) {
+    var log = (session && session.log) || {};
+    var ex = (programDay && programDay.ex) || [];
+    var out = [];
+    for (var i = 0; i < ex.length; i++) {
+      var e = ex[i], logged = log[e.id] || [];
+      for (var j = 0; j < e.sets; j++) {
+        if (!logged[j]) out.push({ exIndex: i, exId: e.id, setIndex: j });
+      }
+    }
+    return out;
   }
 
   /* ---------- progression suggestions ---------- */
@@ -547,11 +678,15 @@
     logSetIntoSession: logSetIntoSession, undoSetInSession: undoSetInSession, sessionSetsDone: sessionSetsDone,
     startRest: startRest, pauseRest: pauseRest, resumeRest: resumeRest, skipRest: skipRest, restRemainingMs: restRemainingMs,
     reconcileActions: reconcileActions, shouldShowNotification: shouldShowNotification,
-    newPlan: newPlan, newPlanDay: newPlanDay, findPlan: findPlan, findPlanDay: findPlanDay,
-    planDayForWeekday: planDayForWeekday, createPlan: createPlan, duplicatePlan: duplicatePlan, deletePlan: deletePlan,
-    addDayToPlan: addDayToPlan, removeDayFromPlan: removeDayFromPlan, moveDayInPlan: moveDayInPlan,
-    addExerciseToDay: addExerciseToDay, removeExerciseFromDay: removeExerciseFromDay, moveExerciseInDay: moveExerciseInDay,
-    substituteExerciseInDay: substituteExerciseInDay, weeklyVolumeByMuscle: weeklyVolumeByMuscle,
+    notificationState: notificationState, nextPendingSet: nextPendingSet, pendingSetsList: pendingSetsList,
+    newPlan: newPlan, newTemplate: newTemplate, findPlan: findPlan, findTemplate: findTemplate,
+    scheduleSlot: scheduleSlot, setWeekdayTemplates: setWeekdayTemplates, resolveWeekday: resolveWeekday,
+    applyDayOverride: applyDayOverride,
+    createPlan: createPlan, duplicatePlan: duplicatePlan, deletePlan: deletePlan,
+    addTemplateToPlan: addTemplateToPlan, removeTemplateFromPlan: removeTemplateFromPlan,
+    addExerciseToTemplate: addExerciseToTemplate, removeExerciseFromTemplate: removeExerciseFromTemplate,
+    moveExerciseInTemplate: moveExerciseInTemplate, substituteExerciseInTemplate: substituteExerciseInTemplate,
+    migratePlanShape: migratePlanShape, weeklyVolumeByMuscle: weeklyVolumeByMuscle,
     suggestProgression: suggestProgression, isPR: isPR, e1rm: e1rm,
     migrateBlob: migrateBlob, quarantineInvalidSets: quarantineInvalidSets,
     parseBackupJSON: parseBackupJSON,
