@@ -41,7 +41,9 @@
   }
 
   function sanitizeStepCount(v) {
-    var n = typeof v === 'string' ? parseInt(v, 10) : v;
+    // Strip thousands separators (comma, any whitespace incl. NBSP, straight/curly apostrophe)
+    // first: parseInt('12,345') is 12, which used to be saved silently.
+    var n = typeof v === 'string' ? parseInt(v.replace(/[,\s'’]/g, ''), 10) : v;
     if (!isFiniteNumber(n) || n < 0 || n > 100000) return null;
     return Math.round(n);
   }
@@ -59,6 +61,542 @@
   var PHOTO_URI_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$/;
   function isValidPhotoDataUri(s) {
     return typeof s === 'string' && s.length > 0 && s.length < 400000 && PHOTO_URI_RE.test(s);
+  }
+
+  /* ---------- fitness profile (Phase 3A: personal profile & onboarding) ---------- */
+  var CM_PER_INCH = 2.54, KG_PER_LB = 0.45359237;
+  function sanitizeHeightCm(v) {
+    var n = typeof v === 'string' ? parseFloat(v.replace(',', '.')) : v;
+    if (!isFiniteNumber(n)) return null;
+    if (n <= 50 || n >= 272) return null; // shorter than any living adult / taller than the tallest ever recorded
+    return r1(n);
+  }
+  function feetInchesToCm(ft, inch) {
+    var f = Number(ft) || 0, i = Number(inch) || 0;
+    if (!isFiniteNumber(f) || !isFiniteNumber(i)) return null;
+    return r1((f * 12 + i) * CM_PER_INCH);
+  }
+  // Inches are rounded to the nearest whole inch for display; a rounded total
+  // of 12 carries into an extra foot instead of showing "5'12"".
+  function cmToFeetInches(cm) {
+    if (!isFiniteNumber(cm) || cm <= 0) return { ft: 0, inch: 0 };
+    var totalInches = Math.round(cm / CM_PER_INCH);
+    var ft = Math.floor(totalInches / 12), inch = totalInches % 12;
+    return { ft: ft, inch: inch };
+  }
+  function kgToLb(kg) { return isFiniteNumber(kg) ? r1(kg / KG_PER_LB) : null; }
+  function lbToKg(lb) { return isFiniteNumber(lb) ? r1(lb * KG_PER_LB) : null; }
+  // Accepts a 'YYYY-MM-DD' date-of-birth string (as produced by <input type=date>).
+  // Rejects malformed strings, calendar-invalid dates (e.g. 2024-02-30, which
+  // Date would otherwise silently roll into March), future dates, and ages
+  // outside a plausible human lifespan. Returns the normalized string or null.
+  function sanitizeDob(v, now) {
+    if (typeof v !== 'string') return null;
+    var m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    var y = +m[1], mo = +m[2], d = +m[3];
+    var dt = new Date(y, mo - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+    now = isFiniteNumber(now) ? now : Date.now();
+    if (dt.getTime() > now) return null;
+    var age = ageFromDob(v, now);
+    if (age == null || age > 120) return null;
+    return v;
+  }
+  // Whole years between a 'YYYY-MM-DD' dob and `now`, or null if dob is missing/malformed.
+  function ageFromDob(dob, now) {
+    if (typeof dob !== 'string') return null;
+    var m = dob.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    now = isFiniteNumber(now) ? now : Date.now();
+    var n = new Date(now), y = +m[1], mo = +m[2], d = +m[3];
+    var age = n.getFullYear() - y;
+    if (n.getMonth() + 1 < mo || (n.getMonth() + 1 === mo && n.getDate() < d)) age--;
+    return age < 0 ? null : age;
+  }
+  function defaultWorkoutPrefs() {
+    return {
+      daysPerWeek: null, scheduleType: null, availableDays: [], sessionDuration: null,
+      equipmentAccess: null, equipment: [], customEquipment: [], preferredSplit: null,
+      priorityMuscles: [], preferredExercises: [], avoidExercises: [], limitations: null
+    };
+  }
+  // The whole personal-profile/onboarding shape, additive to the existing profile
+  // (targets/weights/baseline/...). Every field defaults to null/empty - never a
+  // guessed real-world value - so a skipped question is indistinguishable from
+  // "not asked yet" and nothing fabricated ever gets displayed as the user's own data.
+  function defaultFitnessProfile() {
+    return {
+      onboarded: false, onboardingStep: 0,
+      units: { weight: 'kg', height: 'cm' },
+      dob: null, heightCm: null, currentWeightKg: null, targetWeightKg: null,
+      gender: null, experience: null,
+      primaryGoal: null, secondaryGoals: [], customGoals: [],
+      activityLevel: null, currentTrainingFrequency: null,
+      workoutPrefs: defaultWorkoutPrefs()
+    };
+  }
+  // Fills in any missing/partial fields (an old install with no `fitness` key at
+  // all, a hand-edited or partially-restored backup, a future field this version
+  // does not know about yet) against defaultFitnessProfile(), one level deep -
+  // the same shallow per-field merge convention loadLocal() already uses for
+  // profile.targets. Never discards an existing answered field.
+  function mergeFitnessProfile(existing) {
+    var d = defaultFitnessProfile();
+    var out = Object.assign({}, d, existing || {});
+    out.units = Object.assign({}, d.units, (existing && existing.units) || {});
+    out.workoutPrefs = Object.assign({}, d.workoutPrefs, (existing && existing.workoutPrefs) || {});
+    if (!Array.isArray(out.secondaryGoals)) out.secondaryGoals = [];
+    if (!Array.isArray(out.customGoals)) out.customGoals = [];
+    return out;
+  }
+
+  /* ---------- exercise library (Phase 3C) ---------- */
+  function slugify(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''); }
+
+  // Canonical muscle-group/equipment id lists, kept here (not only in app.js) so the library and
+  // generator - pure, DOM-free, tested under Node - never need app.js to filter or label. Same
+  // label strings and same slug() as app.js's own MUSCLE_GROUPS/EQUIPMENT constants, so a
+  // profile's `priorityMuscles`/`equipment` ids (chosen in the Phase 3A onboarding UI) line up
+  // with these with no translation step.
+  var MUSCLE_LABELS = ['Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Forearms', 'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs / core', 'Full body'];
+  var MUSCLE_GROUPS = MUSCLE_LABELS.map(function (l) { return { id: slugify(l), label: l }; });
+  var EQUIPMENT_LABELS = ['Barbell', 'Dumbbells', 'Kettlebells', 'Cable machine', 'Resistance bands', 'Pull-up bar', 'Bench', 'Squat rack', 'Smith machine', 'Leg press machine', 'Lat pulldown machine', 'Rowing machine', 'Treadmill', 'Stationary bike', 'Suspension trainer (TRX)', 'Medicine ball', 'Bodyweight only'];
+  var EQUIPMENT_LIST = EQUIPMENT_LABELS.map(function (l) { return { id: slugify(l), label: l }; });
+  var WEEK_ORDER_CORE = [1, 2, 3, 4, 5, 6, 0];
+  function labelForMuscle(id) { var m = MUSCLE_GROUPS.filter(function (x) { return x.id === id; })[0]; return m ? m.label : id; }
+
+  // Builtin seed catalogue. `equipment:'bodyweight'` is a sentinel meaning "needs nothing" -
+  // always usable regardless of the user's equipment picks - and is intentionally NOT one of the
+  // EQUIPMENT_LIST ids above (those are things a user selects as owned/available; bodyweight never
+  // needs selecting). Every other `equipment` value must appear in workoutPrefs.equipment to be
+  // offered. Never edit an entry's fields after ship - add a new id instead - since a generated
+  // template exercise copies these fields once, by value (see generateWorkoutPlan), and never
+  // re-reads the catalogue again, so a later edit here could never retroactively change history
+  // but could still change what a *future* generation produces in a way that is hard to reason
+  // about; a new id keeps old and new behaviour both inspectable.
+  function E(id, name, primaryMuscle, secondaryMuscles, movementPattern, equipment, difficulty, sets, lo, hi, rest, inc, loadType, o) {
+    return Object.assign({
+      id: id, name: name, primaryMuscle: primaryMuscle, secondaryMuscles: secondaryMuscles || [],
+      movementPattern: movementPattern, equipment: equipment, difficulty: difficulty,
+      defaultSets: sets, defaultLo: lo, defaultHi: hi, defaultRest: rest, defaultInc: inc,
+      loadType: loadType, unilateral: false, timed: false, assistedCapable: false, notes: '', custom: false
+    }, o || {});
+  }
+  var BUILTIN_EXERCISES = [
+    E('bb-bench-press', 'Barbell Bench Press', 'chest', ['triceps', 'shoulders'], 'push', 'barbell', 'intermediate', 3, 5, 8, 120, 2.5, 'barbell'),
+    E('incline-db-press', 'Incline Dumbbell Press', 'chest', ['shoulders', 'triceps'], 'push', 'dumbbells', 'beginner', 3, 8, 12, 90, 1, 'dumbbell'),
+    E('push-up', 'Push-up', 'chest', ['triceps', 'shoulders'], 'push', 'bodyweight', 'beginner', 3, 8, 15, 60, 0, 'bodyweight'),
+    E('cable-chest-fly', 'Cable Chest Fly', 'chest', ['shoulders'], 'isolation', 'cable-machine', 'beginner', 3, 10, 15, 60, 1, 'cable'),
+    E('machine-chest-press', 'Machine Chest Press', 'chest', ['triceps'], 'push', 'smith-machine', 'beginner', 3, 8, 12, 75, 2.5, 'machine'),
+    E('pull-up', 'Pull-up', 'back', ['biceps'], 'pull', 'pull-up-bar', 'advanced', 3, 4, 10, 120, 0, 'bodyweight', { assistedCapable: true }),
+    E('lat-pulldown', 'Lat Pulldown', 'back', ['biceps'], 'pull', 'lat-pulldown-machine', 'beginner', 3, 8, 12, 90, 2.5, 'machine'),
+    E('bb-row', 'Barbell Row', 'back', ['biceps', 'shoulders'], 'pull', 'barbell', 'intermediate', 3, 6, 10, 90, 2.5, 'barbell'),
+    E('db-row', 'Single-arm Dumbbell Row', 'back', ['biceps'], 'pull', 'dumbbells', 'beginner', 3, 8, 12, 75, 1, 'dumbbell', { unilateral: true }),
+    E('seated-cable-row', 'Seated Cable Row', 'back', ['biceps'], 'pull', 'cable-machine', 'beginner', 3, 8, 12, 75, 2.5, 'cable'),
+    E('superman', 'Superman', 'back', ['glutes'], 'isolation', 'bodyweight', 'beginner', 3, 10, 15, 45, 0, 'bodyweight'),
+    E('deadlift', 'Barbell Deadlift', 'back', ['hamstrings', 'glutes'], 'hinge', 'barbell', 'advanced', 3, 3, 6, 150, 2.5, 'barbell'),
+    E('bb-overhead-press', 'Barbell Overhead Press', 'shoulders', ['triceps'], 'push', 'barbell', 'intermediate', 3, 5, 8, 120, 2.5, 'barbell'),
+    E('db-shoulder-press', 'Dumbbell Shoulder Press', 'shoulders', ['triceps'], 'push', 'dumbbells', 'beginner', 3, 8, 12, 90, 1, 'dumbbell'),
+    E('pike-pushup', 'Pike Push-up', 'shoulders', ['triceps'], 'push', 'bodyweight', 'intermediate', 3, 6, 12, 60, 0, 'bodyweight'),
+    E('lateral-raise', 'Dumbbell Lateral Raise', 'shoulders', [], 'isolation', 'dumbbells', 'beginner', 3, 12, 15, 60, 0.5, 'dumbbell'),
+    E('face-pull', 'Cable Face Pull', 'shoulders', ['back'], 'isolation', 'cable-machine', 'beginner', 3, 12, 15, 60, 1, 'cable'),
+    E('machine-shoulder-press', 'Machine Shoulder Press', 'shoulders', ['triceps'], 'push', 'smith-machine', 'beginner', 3, 8, 12, 75, 2.5, 'machine'),
+    E('bb-curl', 'Barbell Curl', 'biceps', ['forearms'], 'isolation', 'barbell', 'beginner', 3, 8, 12, 60, 1, 'barbell'),
+    E('db-curl', 'Dumbbell Curl', 'biceps', ['forearms'], 'isolation', 'dumbbells', 'beginner', 3, 8, 12, 60, 0.5, 'dumbbell'),
+    E('cable-curl', 'Cable Curl', 'biceps', ['forearms'], 'isolation', 'cable-machine', 'beginner', 3, 10, 15, 60, 1, 'cable'),
+    E('hammer-curl', 'Hammer Curl', 'biceps', ['forearms'], 'isolation', 'dumbbells', 'beginner', 3, 8, 12, 60, 0.5, 'dumbbell'),
+    E('triceps-pushdown', 'Triceps Pushdown', 'triceps', [], 'isolation', 'cable-machine', 'beginner', 3, 10, 15, 60, 1, 'cable'),
+    E('skull-crusher', 'Skull Crusher', 'triceps', [], 'isolation', 'barbell', 'intermediate', 3, 8, 12, 60, 1, 'barbell'),
+    E('db-overhead-extension', 'Dumbbell Overhead Extension', 'triceps', [], 'isolation', 'dumbbells', 'beginner', 3, 10, 15, 60, 0.5, 'dumbbell'),
+    E('dips', 'Dips', 'triceps', ['chest', 'shoulders'], 'push', 'bodyweight', 'advanced', 3, 6, 12, 90, 0, 'bodyweight', { assistedCapable: true }),
+    E('wrist-curl', 'Dumbbell Wrist Curl', 'forearms', [], 'isolation', 'dumbbells', 'beginner', 3, 12, 20, 45, 0.5, 'dumbbell'),
+    E('farmers-carry', 'Farmer\'s Carry', 'forearms', ['back', 'quads'], 'carry', 'kettlebells', 'intermediate', 3, 20, 40, 90, 2.5, 'kettlebell', { timed: true }),
+    E('bb-back-squat', 'Barbell Back Squat', 'quads', ['glutes', 'hamstrings'], 'squat', 'barbell', 'intermediate', 3, 5, 8, 150, 2.5, 'barbell'),
+    E('leg-press', 'Leg Press', 'quads', ['glutes'], 'squat', 'leg-press-machine', 'beginner', 3, 8, 12, 120, 5, 'machine'),
+    E('db-lunge', 'Dumbbell Lunge', 'quads', ['glutes', 'hamstrings'], 'lunge', 'dumbbells', 'beginner', 3, 8, 12, 90, 1, 'dumbbell', { unilateral: true }),
+    E('bodyweight-squat', 'Bodyweight Squat', 'quads', ['glutes'], 'squat', 'bodyweight', 'beginner', 3, 12, 20, 60, 0, 'bodyweight'),
+    E('leg-extension', 'Leg Extension', 'quads', [], 'isolation', 'leg-press-machine', 'beginner', 3, 10, 15, 75, 2.5, 'machine'),
+    E('romanian-deadlift', 'Romanian Deadlift', 'hamstrings', ['glutes', 'back'], 'hinge', 'barbell', 'intermediate', 3, 6, 10, 120, 2.5, 'barbell'),
+    E('leg-curl', 'Leg Curl', 'hamstrings', [], 'isolation', 'leg-press-machine', 'beginner', 3, 10, 15, 75, 2.5, 'machine'),
+    E('kettlebell-swing', 'Kettlebell Swing', 'hamstrings', ['glutes', 'back'], 'hinge', 'kettlebells', 'intermediate', 3, 12, 20, 75, 2, 'kettlebell'),
+    E('single-leg-glute-bridge', 'Single-leg Glute Bridge', 'hamstrings', ['glutes'], 'hinge', 'bodyweight', 'intermediate', 3, 10, 15, 45, 0, 'bodyweight', { unilateral: true }),
+    E('hip-thrust', 'Barbell Hip Thrust', 'glutes', ['hamstrings'], 'hinge', 'barbell', 'beginner', 3, 8, 12, 90, 2.5, 'barbell'),
+    E('glute-bridge', 'Glute Bridge', 'glutes', ['hamstrings'], 'hinge', 'bodyweight', 'beginner', 3, 12, 20, 60, 0, 'bodyweight'),
+    E('cable-kickback', 'Cable Glute Kickback', 'glutes', [], 'isolation', 'cable-machine', 'beginner', 3, 12, 15, 60, 1, 'cable', { unilateral: true }),
+    E('standing-calf-raise', 'Standing Calf Raise', 'calves', [], 'isolation', 'smith-machine', 'beginner', 3, 12, 20, 60, 2.5, 'machine'),
+    E('db-calf-raise', 'Dumbbell Calf Raise', 'calves', [], 'isolation', 'dumbbells', 'beginner', 3, 12, 20, 45, 1, 'dumbbell'),
+    E('bodyweight-calf-raise', 'Bodyweight Calf Raise', 'calves', [], 'isolation', 'bodyweight', 'beginner', 3, 15, 25, 30, 0, 'bodyweight'),
+    E('plank', 'Plank', 'abs-core', ['shoulders'], 'core', 'bodyweight', 'beginner', 3, 20, 60, 45, 0, 'bodyweight', { timed: true }),
+    E('cable-crunch', 'Cable Crunch', 'abs-core', [], 'core', 'cable-machine', 'beginner', 3, 12, 15, 60, 1, 'cable'),
+    E('hanging-leg-raise', 'Hanging Leg Raise', 'abs-core', ['forearms'], 'core', 'pull-up-bar', 'advanced', 3, 8, 15, 60, 0, 'bodyweight'),
+    E('russian-twist', 'Russian Twist', 'abs-core', [], 'core', 'bodyweight', 'beginner', 3, 16, 24, 45, 0, 'bodyweight'),
+    E('burpee', 'Burpee', 'full-body', ['quads', 'chest'], 'core', 'bodyweight', 'intermediate', 3, 8, 15, 60, 0, 'bodyweight'),
+    E('thruster', 'Barbell Thruster', 'full-body', ['quads', 'shoulders'], 'squat', 'barbell', 'advanced', 3, 6, 10, 90, 2.5, 'barbell')
+  ];
+
+  function defaultLibrary() { return { custom: [], flags: {} }; }
+  // Additive merge, same convention as mergeFitnessProfile: fills in anything missing from an
+  // old/partial/hand-edited blob against the defaults, never discards an existing custom
+  // exercise or flag. A flag entry for an id that no longer resolves (a deleted custom exercise)
+  // is harmless dead weight, not an error, and is left alone rather than pruned.
+  function mergeLibrary(existing) {
+    var d = defaultLibrary();
+    var out = Object.assign({}, d, existing || {});
+    if (!Array.isArray(out.custom)) out.custom = [];
+    out.flags = Object.assign({}, (existing && existing.flags) || {});
+    return out;
+  }
+  function allLibraryExercises(library) {
+    return BUILTIN_EXERCISES.concat((library && library.custom) || []);
+  }
+  function findLibraryExercise(library, id) {
+    return allLibraryExercises(library).filter(function (e) { return e.id === id; })[0] || null;
+  }
+  function libraryFlags(library, id) {
+    return (library && library.flags && library.flags[id]) || { favorite: false, avoid: false };
+  }
+  function setLibraryFlag(library, id, key, value) {
+    if (!library.flags) library.flags = {};
+    var cur = Object.assign({ favorite: false, avoid: false }, library.flags[id] || {});
+    cur[key] = !!value;
+    library.flags[id] = cur;
+    return cur;
+  }
+  function addCustomExercise(library, def, now) {
+    var ex = Object.assign({}, def, { id: 'custom-' + slugify(def.name || 'exercise') + '-' + genId(now), custom: true });
+    if (!Array.isArray(library.custom)) library.custom = [];
+    library.custom.push(ex);
+    return ex;
+  }
+  // Edits an existing custom entry in place - the id and custom:true are never overwritten by
+  // the patch, so an edit can never turn a custom exercise into something masquerading as
+  // another entry. Builtins are immutable by design (see BUILTIN_EXERCISES comment) and are not
+  // reachable here. Never touches any template exercise that previously copied this entry's
+  // fields by value - those snapshots (and any completed session's exSnapshot) stay exactly as
+  // they were, per the same historical-data guarantee as the rest of the library.
+  function updateCustomExercise(library, id, patch) {
+    var idx = ((library && library.custom) || []).findIndex(function (e) { return e.id === id; });
+    if (idx < 0) return null;
+    library.custom[idx] = Object.assign({}, library.custom[idx], patch, { id: id, custom: true });
+    return library.custom[idx];
+  }
+  function removeCustomExercise(library, id) {
+    var idx = ((library && library.custom) || []).findIndex(function (e) { return e.id === id; });
+    if (idx < 0) return false;
+    library.custom.splice(idx, 1);
+    return true;
+  }
+
+  // Whether a library entry can be trained right now: bodyweight entries always can (no
+  // equipment needed); anything else needs that exact equipment id in the user's own list.
+  function equipmentAvailable(entry, equipmentIds) {
+    if (!entry) return false;
+    if (entry.equipment === 'bodyweight') return true;
+    return (equipmentIds || []).indexOf(entry.equipment) >= 0;
+  }
+  var EXPERIENCE_RANK = { beginner: 1, intermediate: 2, advanced: 3 };
+  function experienceAllows(entry, experience) {
+    var userRank = EXPERIENCE_RANK[experience] || 1;
+    var exRank = EXPERIENCE_RANK[entry.difficulty] || 1;
+    return exRank <= userRank + 1; // a beginner may still be offered one step up, never two
+  }
+  function nameAvoided(name, avoidNames) {
+    var n = (name || '').toLowerCase();
+    return (avoidNames || []).some(function (a) { return (a || '').toLowerCase() === n; });
+  }
+
+  // Ranked, explained substitutes for one exercise: same primary muscle first (falling back to
+  // the same movement pattern), filtered to equipment the user actually has and exercises not
+  // flagged/listed as avoided, then ordered by experience fit. Pure/read-only - callers decide
+  // whether and how to apply a substitution via the existing substituteExerciseInTemplate.
+  function findAlternatives(library, exerciseId, workoutPrefs, experience) {
+    var target = findLibraryExercise(library, exerciseId);
+    if (!target) return [];
+    var equipmentIds = (workoutPrefs && workoutPrefs.equipment) || [];
+    var avoidNames = (workoutPrefs && workoutPrefs.avoidExercises) || [];
+    var preferredNames = (workoutPrefs && workoutPrefs.preferredExercises) || [];
+    return allLibraryExercises(library)
+      .filter(function (e) { return e.id !== target.id; })
+      .filter(function (e) { return e.primaryMuscle === target.primaryMuscle || e.movementPattern === target.movementPattern; })
+      .filter(function (e) { return equipmentAvailable(e, equipmentIds); })
+      .filter(function (e) { return !nameAvoided(e.name, avoidNames) && !libraryFlags(library, e.id).avoid; })
+      .map(function (e) {
+        var reasons = [];
+        reasons.push(e.primaryMuscle === target.primaryMuscle ? 'Trains the same muscle group' : 'Similar movement pattern');
+        reasons.push('uses equipment you have');
+        if (!experienceAllows(e, experience)) reasons.push('is more advanced than your current level');
+        if (nameAvoided(e.name, preferredNames) || libraryFlags(library, e.id).favorite) reasons.push('one of your preferred exercises');
+        return { entry: e, reason: reasons.join(', ') };
+      })
+      .sort(function (a, b) {
+        var sameMuscleA = a.entry.primaryMuscle === target.primaryMuscle ? 0 : 1;
+        var sameMuscleB = b.entry.primaryMuscle === target.primaryMuscle ? 0 : 1;
+        if (sameMuscleA !== sameMuscleB) return sameMuscleA - sameMuscleB;
+        var expA = experienceAllows(a.entry, experience) ? 0 : 1;
+        var expB = experienceAllows(b.entry, experience) ? 0 : 1;
+        if (expA !== expB) return expA - expB;
+        return a.entry.name.localeCompare(b.entry.name);
+      });
+  }
+
+  /* ---------- workout generator (Phase 3B) ---------- */
+  // days x experience -> split, with a plain-language reason (requirement: explain why a split
+  // was chosen). Only used when the profile's preferredSplit is unset/'auto'.
+  var AUTO_SPLIT_TABLE = [
+    { maxDays: 3, split: 'full_body', reason: 'With 2-3 days a week, training the whole body each session gives every muscle group more frequent, consistent stimulus than splitting it up.' },
+    { maxDays: 4, split: 'upper_lower', reason: 'With 4 days a week, alternating upper and lower body lets you train each twice while still recovering between sessions.' },
+    { maxDays: 7, split: 'ppl', reason: 'With 5 or more days a week, a push/pull/legs rotation spreads enough volume across the week without retraining the same muscles on consecutive days.' }
+  ];
+  function pickAutoSplit(daysPerWeek) {
+    var row = AUTO_SPLIT_TABLE.filter(function (r) { return daysPerWeek <= r.maxDays; })[0] || AUTO_SPLIT_TABLE[AUTO_SPLIT_TABLE.length - 1];
+    return { split: row.split, reason: row.reason };
+  }
+  var SPLIT_DAY_TYPES = {
+    full_body: ['full_body'], upper_lower: ['upper', 'lower'], ppl: ['push', 'pull', 'legs'],
+    body_part: ['chest_back', 'shoulders_arms', 'legs_core'], custom: []
+  };
+  var DAY_TYPE_MUSCLES = {
+    full_body: ['chest', 'back', 'quads', 'shoulders', 'hamstrings', 'abs-core'],
+    upper: ['chest', 'back', 'shoulders', 'biceps', 'triceps'],
+    lower: ['quads', 'hamstrings', 'glutes', 'calves', 'abs-core'],
+    push: ['chest', 'shoulders', 'triceps'], pull: ['back', 'biceps', 'forearms'], legs: ['quads', 'hamstrings', 'glutes', 'calves'],
+    chest_back: ['chest', 'back'], shoulders_arms: ['shoulders', 'biceps', 'triceps'], legs_core: ['quads', 'hamstrings', 'glutes', 'abs-core']
+  };
+  var DAY_TYPE_LABELS = {
+    full_body: 'Full body', upper: 'Upper body', lower: 'Lower body', push: 'Push', pull: 'Pull', legs: 'Legs',
+    chest_back: 'Chest & Back', shoulders_arms: 'Shoulders & Arms', legs_core: 'Legs & Core'
+  };
+  function dayTypesForDays(split, daysPerWeek) {
+    var rotation = SPLIT_DAY_TYPES[split] || SPLIT_DAY_TYPES.full_body;
+    var out = [];
+    for (var i = 0; i < daysPerWeek; i++) out.push(rotation[i % rotation.length]);
+    return out;
+  }
+  // Rep range / rest / set-count emphasis by primary goal - a simple, explainable starting point
+  // the user can edit freely, not a claim of research-backed numbers.
+  var GOAL_EMPHASIS = {
+    strength: { lo: 3, hi: 6, restFactor: 1.3 }, muscle_gain: { lo: 6, hi: 12, restFactor: 1 },
+    body_recomp: { lo: 8, hi: 12, restFactor: 0.9 }, fat_loss: { lo: 10, hi: 15, restFactor: 0.7 },
+    endurance: { lo: 12, hi: 20, restFactor: 0.6 }, athletic_performance: { lo: 5, hi: 10, restFactor: 1 },
+    conditioning: { lo: 10, hi: 15, restFactor: 0.6 }, general_fitness: { lo: 8, hi: 12, restFactor: 1 },
+    mobility: { lo: 10, hi: 15, restFactor: 0.8, setsDelta: -1 }, weight_maintenance: { lo: 8, hi: 12, restFactor: 1 }
+  };
+  var EXPERIENCE_SETS_DELTA = { beginner: -1, intermediate: 0, advanced: 1 };
+  // ~ minutes per exercise including its rest - a rough planning heuristic for how many
+  // exercises fit a session, not a promise.
+  var MINUTES_PER_EXERCISE = 11;
+  function exercisesPerDay(sessionDuration) {
+    var n = Math.round((sessionDuration || 45) / MINUTES_PER_EXERCISE);
+    return Math.max(3, Math.min(8, n));
+  }
+
+  // Most recent logged working weight for an exercise name, from real session history across
+  // every day/session the same way weeklyVolumeByMuscle reads it - never fabricated. `sessions`
+  // is a flat array (caller flattens S.days the same way weeklyVolumeByMuscle's caller already does).
+  function lastLoggedWeightForName(sessions, name) {
+    var n = (name || '').toLowerCase(), best = null;
+    (sessions || []).forEach(function (session) {
+      var exMap = {}; (session.exSnapshot || []).forEach(function (e) { exMap[e.id] = e; });
+      Object.keys((session && session.log) || {}).forEach(function (exId) {
+        var ex = exMap[exId];
+        if (!ex || (ex.name || '').toLowerCase() !== n) return;
+        (session.log[exId] || []).forEach(function (s) {
+          if (!s || !(s.w > 0)) return;
+          var ts = session.finishedAt || session.startedAt || 0;
+          if (!best || ts >= best.ts) best = { ts: ts, w: s.w };
+        });
+      });
+    });
+    return best ? best.w : null;
+  }
+
+  // Deterministic, rules-based weekly plan generator. Pure: reads `fitnessProfile`/`library`/
+  // `sessions` and returns a PLAIN PREVIEW object - it never writes to S.plans/S.days itself.
+  // Saving (via newPlan/createPlan/addTemplateToPlan/addExerciseToTemplate/setWeekdayTemplates,
+  // the exact builders the manual plan editor already uses) is the caller's job, so a saved
+  // generated plan is byte-for-byte the same shape as a hand-built one and can be edited with the
+  // same code. `weekdayAssignment` is parallel to `days` (weekday number or null, NOT a
+  // plan.schedule map) because the real template ids only exist once the caller creates them.
+  function generateWorkoutPlan(fitnessProfile, library, sessions, now) {
+    now = isFiniteNumber(now) ? now : Date.now();
+    var wp = (fitnessProfile && fitnessProfile.workoutPrefs) || defaultWorkoutPrefs();
+    var experience = (fitnessProfile && fitnessProfile.experience) || 'beginner';
+    var goal = (fitnessProfile && fitnessProfile.primaryGoal) || 'general_fitness';
+    var daysPerWeek = wp.daysPerWeek || 3;
+    var sessionDuration = wp.sessionDuration || 45;
+    var equipmentIds = wp.equipment || [];
+    var avoidNames = wp.avoidExercises || [];
+    var preferredNames = wp.preferredExercises || [];
+    var priorityMuscles = wp.priorityMuscles || [];
+
+    if (wp.preferredSplit === 'custom') {
+      return { ok: false, reason: 'custom-split', message: 'You chose to build your own split - use the plan editor to create it exercise by exercise.' };
+    }
+    var splitPick = (wp.preferredSplit && wp.preferredSplit !== 'auto' && SPLIT_DAY_TYPES[wp.preferredSplit])
+      ? { split: wp.preferredSplit, reason: 'Using your preferred split.' }
+      : pickAutoSplit(daysPerWeek);
+    var dayTypes = dayTypesForDays(splitPick.split, daysPerWeek);
+    var emphasis = GOAL_EMPHASIS[goal] || GOAL_EMPHASIS.general_fitness;
+    var setsDelta = (emphasis.setsDelta || 0) + (EXPERIENCE_SETS_DELTA[experience] || 0);
+    var perDayCount = exercisesPerDay(sessionDuration);
+    var allEx = allLibraryExercises(library);
+
+    function usable(entry) {
+      return equipmentAvailable(entry, equipmentIds) && experienceAllows(entry, experience) &&
+        !nameAvoided(entry.name, avoidNames) && !libraryFlags(library, entry.id).avoid;
+    }
+    function rank(entry) {
+      var score = 0;
+      if (priorityMuscles.indexOf(entry.primaryMuscle) >= 0) score -= 3;
+      if (nameAvoided(entry.name, preferredNames) || libraryFlags(library, entry.id).favorite) score -= 2;
+      if (entry.difficulty === experience) score -= 1;
+      return score;
+    }
+
+    var typeCounts = {}; dayTypes.forEach(function (t) { typeCounts[t] = (typeCounts[t] || 0) + 1; });
+    var typeSeen = {};
+    var days = dayTypes.map(function (dayType) {
+      var muscles = DAY_TYPE_MUSCLES[dayType] || [];
+      var picks = [], usedIds = {};
+      muscles.forEach(function (m) {
+        var slots = priorityMuscles.indexOf(m) >= 0 ? 2 : 1;
+        var candidates = allEx.filter(function (e) { return e.primaryMuscle === m && usable(e) && !usedIds[e.id]; })
+          .sort(function (a, b) { return (rank(a) - rank(b)) || a.id.localeCompare(b.id); });
+        candidates.slice(0, slots).forEach(function (e) { picks.push(e); usedIds[e.id] = true; });
+      });
+      if (picks.length > perDayCount) picks = picks.slice(0, Math.max(perDayCount, muscles.length));
+      var exercises = picks.map(function (entry) {
+        var rest = Math.max(30, Math.round(entry.defaultRest * emphasis.restFactor / 5) * 5);
+        var sets = Math.max(2, entry.defaultSets + setsDelta);
+        var startW = entry.loadType === 'bodyweight' ? null : lastLoggedWeightForName(sessions, entry.name);
+        return {
+          id: genId(now) + '-gex-' + Math.random().toString(36).slice(2, 6),
+          libraryId: entry.id, name: entry.name, sets: sets, lo: emphasis.lo, hi: emphasis.hi, rest: rest, inc: entry.defaultInc,
+          start: startW, muscle: labelForMuscle(entry.primaryMuscle), cue: '',
+          bw: entry.loadType === 'bodyweight', assisted: false, timed: !!entry.timed
+        };
+      });
+      var label = DAY_TYPE_LABELS[dayType] || dayType, name = label;
+      if (typeCounts[dayType] > 1) {
+        var n = typeSeen[dayType] = (typeSeen[dayType] || 0) + 1;
+        name = label + ' ' + String.fromCharCode(64 + n);
+      }
+      return { name: name, tag: label, dayType: dayType, exercises: exercises };
+    });
+
+    var flexible = true, weekdayAssignment = days.map(function () { return null; });
+    if (wp.scheduleType === 'fixed' && (wp.availableDays || []).length) {
+      flexible = false;
+      var orderedDays = WEEK_ORDER_CORE.filter(function (wd) { return wp.availableDays.indexOf(wd) >= 0; });
+      weekdayAssignment = days.map(function (_, i) { return orderedDays.length ? orderedDays[i % orderedDays.length] : null; });
+    }
+
+    return { ok: true, split: splitPick.split, splitReason: splitPick.reason, daysPerWeek: daysPerWeek, flexible: flexible, weekdayAssignment: weekdayAssignment, days: days };
+  }
+
+  /* ---------- plate calculator (Phase 3D) ---------- */
+  // All arithmetic here runs in integer grams internally - kg weights carry 1-2 decimal places
+  // (1.25kg plates are standard) and repeated float addition/subtraction across several plates
+  // drifts (0.1+0.2 !== 0.3 in IEEE754). Every public function still takes/returns plain kg.
+  function kgToGrams(kg) { return Math.round((kg || 0) * 1000); }
+  function gramsToKg(g) { return Math.round(g) / 1000; }
+  function kgDiff(a, b) { return gramsToKg(kgToGrams(a) - kgToGrams(b)); }
+
+  // Greedy, descending-weight fill of a target from a limited multiset of denominations -
+  // deliberately not an exhaustive subset-sum search: this is how a lifter actually loads a bar
+  // or a pin-loaded stack in practice (always the biggest piece that still fits), it is fast and
+  // deterministic, and it naturally respects a limited inventory. `inventory` is
+  // [{weight(kg), count}]; `maxPerDenom(count)` caps how many of a denomination this call may
+  // use - floor(count/2) for one side of a barbell (both sides need a matching plate), or
+  // `count` itself for an unpaired stack. Never returns more than the target (never overshoots).
+  function greedyLoad(targetKg, inventory, maxPerDenom) {
+    var targetG = Math.max(0, kgToGrams(targetKg));
+    var denoms = (inventory || [])
+      .filter(function (p) { return p && p.weight > 0 && p.count > 0; })
+      .map(function (p) { return { weightG: kgToGrams(p.weight), weightKg: p.weight, max: maxPerDenom(p.count) }; })
+      .filter(function (d) { return d.weightG > 0 && d.max > 0; })
+      .sort(function (a, b) { return b.weightG - a.weightG; });
+    var remaining = targetG, used = [];
+    denoms.forEach(function (d) {
+      var n = Math.min(d.max, Math.floor(remaining / d.weightG));
+      if (n > 0) { used.push({ weight: d.weightKg, n: n }); remaining -= n * d.weightG; }
+    });
+    return { used: used, reachedKg: gramsToKg(targetG - remaining) };
+  }
+  // Symmetric barbell loading: total = bar + collars + 2x(one side). Searches only the per-side
+  // half-target, using at most floor(count/2) of each plate denomination (a plate is only usable
+  // if there is a matching one for the other side), then doubles it back out.
+  function findBarbellLoading(targetTotalKg, bar, plates) {
+    var barWeight = (bar && bar.weight) || 0, collar = (bar && bar.collarWeight) || 0;
+    var perSideTarget = Math.max(0, (targetTotalKg - barWeight - collar) / 2);
+    var r = greedyLoad(perSideTarget, plates, function (count) { return Math.floor(count / 2); });
+    var achievableTotal = gramsToKg(kgToGrams(barWeight) + kgToGrams(collar) + 2 * kgToGrams(r.reachedKg));
+    return { achievableTotal: achievableTotal, perSide: r.used, diffFromTarget: kgDiff(achievableTotal, targetTotalKg) };
+  }
+  // Unpaired pin-loaded stack (machine/cable/Smith): total = base + sum(selected increments).
+  // `stack.increments` are the user's own labelled/configured values - never an invented number.
+  function findStackLoading(targetTotalKg, stack) {
+    var base = (stack && stack.baseWeight) || 0;
+    var delta = Math.max(0, targetTotalKg - base);
+    var r = greedyLoad(delta, (stack && stack.increments) || [], function (count) { return count; });
+    var achievableTotal = gramsToKg(kgToGrams(base) + kgToGrams(r.reachedKg));
+    return { achievableTotal: achievableTotal, selected: r.used, diffFromTarget: kgDiff(achievableTotal, targetTotalKg) };
+  }
+  // Fixed-increment equipment (most dumbbell racks): nearest reachable multiple of `step` within
+  // [min, max]. Never implies a weight finer than the rack's real increments.
+  function nearestStepped(targetKg, step, min, max) {
+    step = step > 0 ? step : 1;
+    min = isFiniteNumber(min) ? min : 0;
+    max = isFiniteNumber(max) ? max : Infinity;
+    var n = Math.round((targetKg - min) / step);
+    var achievable = Math.max(min, Math.min(max, min + n * step));
+    achievable = gramsToKg(kgToGrams(achievable));
+    return { achievableTotal: achievable, diffFromTarget: kgDiff(achievable, targetKg) };
+  }
+  // Irregular fixed sizes (kettlebells): nearest value in the user's own entered list - never a
+  // guessed size they don't actually have.
+  function nearestFromList(targetKg, values) {
+    var list = (values || []).filter(isFiniteNumber);
+    if (!list.length) return { achievableTotal: null, diffFromTarget: null };
+    var best = list[0];
+    list.forEach(function (v) { if (Math.abs(v - targetKg) < Math.abs(best - targetKg)) best = v; });
+    return { achievableTotal: best, diffFromTarget: kgDiff(best, targetKg) };
+  }
+
+  function defaultPlateCalc() {
+    return {
+      unit: 'kg',
+      bar: { weight: 20, collarWeight: 2.5 },
+      barPresets: [
+        { id: 'oly20', label: "Men's Olympic 20kg", weight: 20 },
+        { id: 'oly15', label: "Women's Olympic 15kg", weight: 15 },
+        { id: 'tech10', label: 'Technique bar 10kg', weight: 10 }
+      ],
+      plates: [
+        { weight: 25, count: 2 }, { weight: 20, count: 2 }, { weight: 15, count: 2 }, { weight: 10, count: 2 },
+        { weight: 5, count: 2 }, { weight: 2.5, count: 2 }, { weight: 1.25, count: 2 }
+      ],
+      dumbbellStep: 2,
+      kettlebells: [8, 12, 16, 20, 24, 28, 32],
+      stack: { baseWeight: 0, increments: [{ weight: 5, count: 20 }] },
+      exerciseEquipment: {}
+    };
+  }
+  // Additive merge, same convention as mergeFitnessProfile/mergeLibrary: fills in anything
+  // missing from an old/partial/hand-edited blob against the defaults, never discards an
+  // existing bar preset/plate row/remembered per-exercise equipment choice.
+  function mergePlateCalc(existing) {
+    var d = defaultPlateCalc();
+    var out = Object.assign({}, d, existing || {});
+    out.bar = Object.assign({}, d.bar, (existing && existing.bar) || {});
+    if (!Array.isArray(out.barPresets)) out.barPresets = d.barPresets;
+    if (!Array.isArray(out.plates)) out.plates = d.plates;
+    if (!Array.isArray(out.kettlebells)) out.kettlebells = d.kettlebells;
+    out.stack = Object.assign({}, d.stack, (existing && existing.stack) || {});
+    if (!Array.isArray(out.stack.increments)) out.stack.increments = d.stack.increments;
+    out.exerciseEquipment = Object.assign({}, (existing && existing.exerciseEquipment) || {});
+    return out;
   }
 
   /* ---------- sessions ---------- */
@@ -196,6 +734,15 @@
   // setWeekdayTemplates, so callers never need to null-check before reading .length.
   function scheduleSlot(plan, weekday) {
     return (plan && plan.schedule && plan.schedule[weekday]) || [];
+  }
+  // How many weekdays have at least one workout scheduled: the weekly "x / n sessions" target.
+  // Two options on one weekday is still one training day. A flexible plan has no fixed weekly
+  // schedule, so it has no target (0) and callers should show the bare count instead.
+  function scheduledTrainingDays(plan) {
+    if (!plan || plan.flexible) return 0;
+    var n = 0;
+    for (var wd = 0; wd < 7; wd++) if (scheduleSlot(plan, wd).length) n++;
+    return n;
   }
   function setWeekdayTemplates(plan, weekday, templateIds) {
     if (!plan.schedule) plan.schedule = emptySchedule();
@@ -503,17 +1050,40 @@
     return { w: w0, reps: reps2, last: last, note: 'Same weight. Beat last time by ' + (ex.timed ? '5 seconds' : 'one rep') + ' per set.' };
   }
   function e1rm(ex, s) { return ex.timed || (ex.bw && !s.w) ? s.r : s.w * (1 + s.r / 30); }
+  // Assisted exercises log assistance as a NEGATIVE weight, where e1rm's w * (1 + r/30) is
+  // meaningless (more reps at the same assistance scored as worse, and best>0 could never hold).
+  // Order them by load first - less assistance (higher w) wins - with reps as the tie-break.
+  // r/1000 can never outweigh a real load step: the smallest step is 0.25 kg and reps are < 250.
+  function setScore(ex, s) { return ex.assisted ? s.w + s.r / 1000 : e1rm(ex, s); }
   function isPR(ex, hist, loggedSets) {
-    var best = 0, cur = 0;
-    hist.forEach(function (h) { h.sets.forEach(function (s) { best = Math.max(best, e1rm(ex, s)); }); });
-    (loggedSets || []).forEach(function (s) { if (s) cur = Math.max(cur, e1rm(ex, s)); });
-    return best > 0 && cur > best;
+    var best = -Infinity, cur = -Infinity;
+    hist.forEach(function (h) { h.sets.forEach(function (s) { best = Math.max(best, setScore(ex, s)); }); });
+    (loggedSets || []).forEach(function (s) { if (s) cur = Math.max(cur, setScore(ex, s)); });
+    if (best === -Infinity || cur === -Infinity) return false;
+    return ex.assisted ? cur > best : (best > 0 && cur > best);
+  }
+  // The per-session series the Strength chart plots, and its unit. Timed exercises chart their
+  // best seconds, bodyweight-only ones their best reps, assisted ones the least-assisted load in
+  // kg (negative = assisted), and everything else an estimated one-rep max.
+  function strengthSeries(ex, hist) {
+    hist = hist || [];
+    var noLoad = function (h) { return h.sets.every(function (s) { return !s.w; }); };
+    var best = function (h, f) { return Math.max.apply(null, h.sets.map(f)); };
+    var repsOnly = !!ex.timed || (!!ex.bw && hist.length > 0 && hist.every(noLoad));
+    var points = hist.map(function (h) {
+      var v;
+      if (ex.timed || (ex.bw && noLoad(h))) v = best(h, function (s) { return s.r; });
+      else if (ex.assisted) v = best(h, function (s) { return s.w; });
+      else v = best(h, function (s) { return s.w * (1 + s.r / 30); });
+      return { d: h.d, v: v };
+    });
+    return { unit: ex.timed ? 's' : repsOnly ? 'reps' : 'kg', points: points };
   }
 
   /* ---------- migration (v1 -> schema 2) ---------- */
   function migrateBlob(raw) {
     if (raw && raw.schema === SCHEMA_VERSION) {
-      return { schema: SCHEMA_VERSION, profile: raw.profile || {}, days: raw.days || {}, plans: raw.plans || null, activePlanId: raw.activePlanId || null, migrated: false };
+      return { schema: SCHEMA_VERSION, profile: raw.profile || {}, days: raw.days || {}, plans: raw.plans || null, activePlanId: raw.activePlanId || null, library: raw.library || null, migrated: false };
     }
     if (raw && raw.schema && raw.schema > SCHEMA_VERSION) {
       return { locked: true, reason: 'newer-schema', schemaFound: raw.schema };
@@ -522,7 +1092,7 @@
       // Already session-shaped (days[*].sessions); the only thing schema 3
       // adds is the plans concept, which simply did not exist yet. Nothing
       // about days/sessions themselves needs to change.
-      return { schema: SCHEMA_VERSION, profile: raw.profile || {}, days: raw.days || {}, plans: null, activePlanId: null, migrated: true };
+      return { schema: SCHEMA_VERSION, profile: raw.profile || {}, days: raw.days || {}, plans: null, activePlanId: null, library: raw.library || null, migrated: true };
     }
     var days = {}, profile = (raw && raw.profile) || {};
     Object.keys((raw && raw.days) || {}).forEach(function (date) {
@@ -547,7 +1117,7 @@
         quarantine: { sets: [], food: [] }
       };
     });
-    return { schema: SCHEMA_VERSION, profile: profile, days: days, plans: null, activePlanId: null, migrated: true };
+    return { schema: SCHEMA_VERSION, profile: profile, days: days, plans: null, activePlanId: null, library: raw && raw.library || null, migrated: true };
   }
 
   function quarantineInvalidSets(day, exlist) {
@@ -585,6 +1155,72 @@
     if (!obj.profile || typeof obj.profile !== 'object') return { ok: false, error: 'missing-profile' };
     if (!obj.days || typeof obj.days !== 'object') return { ok: false, error: 'missing-days' };
     return { ok: true, data: obj };
+  }
+  // Turns a parsed backup into the "pending restore" the Restore sheet holds until the user
+  // confirms. Pure, so it is unit-tested directly. It MUST carry plans/activePlanId through:
+  // the export writes them, and dropping them here silently reset a restored user's custom
+  // workout plans to the seeded default. Photos that fail validation are dropped and counted.
+  function prepareRestore(obj) {
+    var photos = {}, dropped = 0, src = (obj && obj.photos) || {};
+    Object.keys(src).forEach(function (k) {
+      var p = src[k];
+      if (p && isValidPhotoDataUri(p.img)) photos[k] = p; else dropped++;
+    });
+    return {
+      schema: obj.schema,
+      profile: obj.profile,
+      days: obj.days,
+      plans: Array.isArray(obj.plans) ? obj.plans : null,
+      activePlanId: typeof obj.activePlanId === 'string' ? obj.activePlanId : null,
+      photos: photos,
+      dropped: dropped
+    };
+  }
+
+  /* ---------- backup reminder + recent foods ---------- */
+  // All data lives on the device (no backend), so a stale or missing backup is the app's biggest
+  // data-loss risk. This decides whether to nudge, as a pure function so it is unit-tested:
+  // never in the first week of data, then when there is no backup at all or the last one is 14+
+  // days old, and not while the user has snoozed the nudge ("Later").
+  var ISO_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+  function daysBetweenISO(a, b) {
+    var pa = a.split('-').map(Number), pb = b.split('-').map(Number);
+    return Math.round((Date.UTC(pb[0], pb[1] - 1, pb[2]) - Date.UTC(pa[0], pa[1] - 1, pa[2])) / 86400000);
+  }
+  function dayHasContent(day) {
+    if (!day || typeof day !== 'object') return false;
+    return !!((day.food && day.food.length) || day.steps > 0 || day.water > 0 || (day.sessions && day.sessions.length));
+  }
+  function backupReminder(profile, days, todayIso, now) {
+    profile = profile || {}; days = days || {};
+    now = isFiniteNumber(now) ? now : Date.now();
+    if (isFiniteNumber(profile.backupSnoozedUntil) && profile.backupSnoozedUntil > now) return null;
+    var first = null;
+    Object.keys(days).forEach(function (d) { if (ISO_DAY_RE.test(d) && dayHasContent(days[d]) && (first === null || d < first)) first = d; });
+    Object.keys(profile.weights || {}).forEach(function (d) { if (ISO_DAY_RE.test(d) && (first === null || d < first)) first = d; });
+    if (first === null || daysBetweenISO(first, todayIso) < 7) return null;
+    if (!isFiniteNumber(profile.lastBackupAt)) return { kind: 'never', sinceDays: null };
+    var since = Math.floor((now - profile.lastBackupAt) / 86400000);
+    return since >= 14 ? { kind: 'stale', sinceDays: since } : null;
+  }
+  // Distinct foods (by name), most recently logged first, each with the quantity and unit last
+  // used - feeds the "Recent" group in the Add sheet and its pre-filled amount.
+  function recentFoods(days, limit) {
+    var out = [], seen = {};
+    limit = isFiniteNumber(limit) ? limit : 10;
+    if (!days || typeof days !== 'object') return out;
+    var keys = Object.keys(days).filter(function (d) { return ISO_DAY_RE.test(d); }).sort().reverse();
+    for (var i = 0; i < keys.length && out.length < limit; i++) {
+      var food = days[keys[i]] && days[keys[i]].food;
+      if (!Array.isArray(food)) continue;
+      for (var j = food.length - 1; j >= 0 && out.length < limit; j--) {
+        var e = food[j];
+        if (!e || typeof e.name !== 'string' || !e.name || seen[e.name]) continue;
+        seen[e.name] = true;
+        out.push({ name: e.name, qty: e.qty, unit: e.unit });
+      }
+    }
+    return out;
   }
 
   /* ---------- Health Connect transforms (pure; native/plugin calls stay in app.js) ---------- */
@@ -671,6 +1307,19 @@
     validateSet: validateSet, sanitizeBodyWeightKg: sanitizeBodyWeightKg,
     sanitizeStepCount: sanitizeStepCount, sanitizeMacroEntry: sanitizeMacroEntry,
     isValidPhotoDataUri: isValidPhotoDataUri,
+    sanitizeHeightCm: sanitizeHeightCm, feetInchesToCm: feetInchesToCm, cmToFeetInches: cmToFeetInches,
+    kgToLb: kgToLb, lbToKg: lbToKg, sanitizeDob: sanitizeDob, ageFromDob: ageFromDob,
+    defaultWorkoutPrefs: defaultWorkoutPrefs, defaultFitnessProfile: defaultFitnessProfile,
+    mergeFitnessProfile: mergeFitnessProfile,
+    MUSCLE_GROUPS: MUSCLE_GROUPS, EQUIPMENT_LIST: EQUIPMENT_LIST, BUILTIN_EXERCISES: BUILTIN_EXERCISES,
+    defaultLibrary: defaultLibrary, mergeLibrary: mergeLibrary, allLibraryExercises: allLibraryExercises,
+    findLibraryExercise: findLibraryExercise, libraryFlags: libraryFlags, setLibraryFlag: setLibraryFlag,
+    addCustomExercise: addCustomExercise, updateCustomExercise: updateCustomExercise, removeCustomExercise: removeCustomExercise,
+    findAlternatives: findAlternatives,
+    generateWorkoutPlan: generateWorkoutPlan, lastLoggedWeightForName: lastLoggedWeightForName,
+    greedyLoad: greedyLoad, findBarbellLoading: findBarbellLoading, findStackLoading: findStackLoading,
+    nearestStepped: nearestStepped, nearestFromList: nearestFromList,
+    defaultPlateCalc: defaultPlateCalc, mergePlateCalc: mergePlateCalc,
     newSession: newSession, findOpenSession: findOpenSession, findSessionById: findSessionById,
     findSessionsForDay: findSessionsForDay, findOpenSessionForDay: findOpenSessionForDay,
     findLastSessionForDay: findLastSessionForDay, decideSessionStart: decideSessionStart,
@@ -680,16 +1329,17 @@
     reconcileActions: reconcileActions, shouldShowNotification: shouldShowNotification,
     notificationState: notificationState, nextPendingSet: nextPendingSet, pendingSetsList: pendingSetsList,
     newPlan: newPlan, newTemplate: newTemplate, findPlan: findPlan, findTemplate: findTemplate,
-    scheduleSlot: scheduleSlot, setWeekdayTemplates: setWeekdayTemplates, resolveWeekday: resolveWeekday,
+    scheduleSlot: scheduleSlot, scheduledTrainingDays: scheduledTrainingDays, setWeekdayTemplates: setWeekdayTemplates, resolveWeekday: resolveWeekday,
     applyDayOverride: applyDayOverride,
     createPlan: createPlan, duplicatePlan: duplicatePlan, deletePlan: deletePlan,
     addTemplateToPlan: addTemplateToPlan, removeTemplateFromPlan: removeTemplateFromPlan,
     addExerciseToTemplate: addExerciseToTemplate, removeExerciseFromTemplate: removeExerciseFromTemplate,
     moveExerciseInTemplate: moveExerciseInTemplate, substituteExerciseInTemplate: substituteExerciseInTemplate,
     migratePlanShape: migratePlanShape, weeklyVolumeByMuscle: weeklyVolumeByMuscle,
-    suggestProgression: suggestProgression, isPR: isPR, e1rm: e1rm,
+    suggestProgression: suggestProgression, isPR: isPR, e1rm: e1rm, strengthSeries: strengthSeries,
     migrateBlob: migrateBlob, quarantineInvalidSets: quarantineInvalidSets,
-    parseBackupJSON: parseBackupJSON,
+    parseBackupJSON: parseBackupJSON, prepareRestore: prepareRestore,
+    backupReminder: backupReminder, recentFoods: recentFoods,
     hcEnergyToKcal: hcEnergyToKcal, hcWeightToKg: hcWeightToKg, hcPermissionState: hcPermissionState,
     mergeSteps: mergeSteps, mergeActiveCalories: mergeActiveCalories, mergeRestingHR: mergeRestingHR, mergeWeights: mergeWeights,
     stepsApplyPolicy: stepsApplyPolicy, weightApplyPolicy: weightApplyPolicy,

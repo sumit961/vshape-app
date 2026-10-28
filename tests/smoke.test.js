@@ -12,9 +12,17 @@ const { createSandbox } = require('./env.js');
 
 const CORE_SRC = fs.readFileSync(path.join(__dirname, '..', 'core.js'), 'utf8');
 const APP_SRC = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+const NUTRITION_SRC = fs.readFileSync(path.join(__dirname, '..', 'nutrition-advanced.js'), 'utf8');
+const NUTRITION_UI_SRC = fs.readFileSync(path.join(__dirname, '..', 'nutrition-ui.js'), 'utf8');
+const THEME_SRC = fs.readFileSync(path.join(__dirname, '..', 'theme-manager.js'), 'utf8');
 const KNOWN_IDS = ['app', 'nav', 'toast', 'timer', 'sheet-root', 'csvIn', 'photoIn', 'backupIn', 'stepsIn'];
 
 function boot(sandbox) {
+  // Same script order as index.html: the nutrition/theme globals must exist before app.js's
+  // top-level defProfile()/boot sequence references VShapeNutrition/VShapeThemes.
+  vm.runInContext(NUTRITION_SRC, sandbox, { filename: 'nutrition-advanced.js' });
+  vm.runInContext(NUTRITION_UI_SRC, sandbox, { filename: 'nutrition-ui.js' });
+  vm.runInContext(THEME_SRC, sandbox, { filename: 'theme-manager.js' });
   vm.runInContext(CORE_SRC, sandbox, { filename: 'core.js' });
   vm.runInContext(APP_SRC, sandbox, { filename: 'app.js' });
 }
@@ -28,6 +36,45 @@ function fireClick(sandbox, act, dataset) {
 }
 function sheetHTML(sandbox) { return sandbox.document.querySelector('#sheet-root').innerHTML; }
 function setVal(sandbox, id, v) { sandbox.document.querySelector('#' + id).value = v; }
+// Drives the real document.addEventListener('input', ...) delegate the same way typing into
+// a field would, for the search boxes that filter a list live (goals/equipment/muscles).
+function fireInput(sandbox, id, v) {
+  const el = sandbox.document.querySelector('#' + id);
+  el.value = v;
+  (sandbox.__listeners.input || []).forEach((fn) => fn({ target: el }));
+}
+function attrValue(html, id) {
+  const m = html.match(new RegExp('id="' + id + '"[^>]*?value="([^"]*)"'));
+  return m ? m[1] : undefined;
+}
+// Drives the real #backupIn 'change' listener the same way picking a file would, now that
+// env.js records element-level listeners and provides a fake FileReader.
+function pickBackupFile(sandbox, obj) {
+  const input = sandbox.document.querySelector('#backupIn');
+  const handler = input._listeners.change[0];
+  handler({ target: { files: [{ text: JSON.stringify(obj) }], value: '' } });
+}
+const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms || 30));
+function readSafetyCopies(sandbox) {
+  return new Promise((resolve) => {
+    const req = sandbox.indexedDB.open('vshape', 2);
+    req.onsuccess = () => {
+      const tx = req.result.transaction('safety');
+      const r = tx.objectStore('safety').getAll();
+      tx.oncomplete = () => resolve(r.result);
+    };
+  });
+}
+function readPhotoStore(sandbox) {
+  return new Promise((resolve) => {
+    const req = sandbox.indexedDB.open('vshape', 2);
+    req.onsuccess = () => {
+      const tx = req.result.transaction('photos');
+      const r = tx.objectStore('photos').getAll();
+      tx.oncomplete = () => resolve(r.result);
+    };
+  });
+}
 
 test('smoke: fresh install boots, renders, and does not inject a fake 70kg weigh-in', () => {
   const sandbox = createSandbox(KNOWN_IDS);
@@ -830,4 +877,749 @@ test('smoke: the rest countdown keeps ticking down on its own every ~500ms while
 
   assert.equal(tval.textContent, 'Go', 'the countdown must have ticked down to completion by itself while continuously visible');
   assert.ok(maxActive <= 1, 'still never more than one interval alive after the rest completed and self-cleared');
+});
+
+/* ---------- Phase 3A: fitness profile & onboarding ---------- */
+test('smoke: fresh install auto-opens the fitness-profile onboarding without blocking the normal Today view underneath', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  const sheet = sheetHTML(sandbox);
+  assert.ok(sheet.includes('Your fitness profile'), 'expected onboarding to auto-open on first boot');
+  assert.ok(sheet.includes('data-act="obstart"'));
+  const appHtml = sandbox.document.querySelector('#app').innerHTML;
+  assert.ok(appHtml.includes('V-SHAPE'), 'the Today view underneath must still render normally, untouched by onboarding');
+});
+
+test('smoke: onboarding "about you" validates dob/height and treats every blank field as a deliberate skip, not an error', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'obstart');
+
+  setVal(sandbox, 'ob-dob', 'not-a-date');
+  fireClick(sandbox, 'obnext');
+  let saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.equal(saved.profile.fitness.onboardingStep, 1, 'an invalid date of birth must block advancing');
+
+  setVal(sandbox, 'ob-dob', '');
+  setVal(sandbox, 'ob-h-cm', '');
+  setVal(sandbox, 'ob-w', '');
+  setVal(sandbox, 'ob-tw', '');
+  fireClick(sandbox, 'obnext');
+  saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  const fp = saved.profile.fitness;
+  assert.equal(fp.onboardingStep, 2, 'leaving every field blank is a deliberate skip and must still advance');
+  assert.equal(fp.dob, null);
+  assert.equal(fp.heightCm, null);
+  assert.equal(fp.currentWeightKg, null);
+  assert.equal(fp.targetWeightKg, null);
+});
+
+test('smoke: onboarding "about you" saves dob/height/weight and converts correctly when the unit toggle is switched', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'obstart');
+  setVal(sandbox, 'ob-dob', '1995-06-15');
+  setVal(sandbox, 'ob-h-cm', '180');
+  setVal(sandbox, 'ob-w', '80');
+  setVal(sandbox, 'ob-tw', '75');
+  fireClick(sandbox, 'obnext');
+
+  let saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  let fp = saved.profile.fitness;
+  assert.equal(fp.dob, '1995-06-15');
+  assert.equal(fp.heightCm, 180);
+  assert.equal(fp.currentWeightKg, 80);
+  assert.equal(fp.targetWeightKg, 75);
+  assert.equal(fp.onboardingStep, 2, 'expected the step to advance and persist for resuming later');
+
+  // Back to "about you" and switch units - the canonical kg/cm values must redisplay converted.
+  fireClick(sandbox, 'obback');
+  fireClick(sandbox, 'obunitweight', { id: 'lb' });
+  fireClick(sandbox, 'obunitheight', { id: 'ftin' });
+  const html = sheetHTML(sandbox);
+  assert.equal(attrValue(html, 'ob-w'), '176.4', '80kg must redisplay as 176.4 lb');
+  assert.equal(attrValue(html, 'ob-tw'), '165.3', '75kg must redisplay as 165.3 lb');
+  assert.equal(attrValue(html, 'ob-h-ft'), '5', '180cm must redisplay as 5 ft');
+  assert.equal(attrValue(html, 'ob-h-in'), '11', '180cm must redisplay as 11 in');
+
+  // Units themselves are saved immediately, same as every other toggle in this app.
+  saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.deepEqual(saved.profile.fitness.units, { weight: 'lb', height: 'ftin' });
+  // The canonical stored values must be unchanged by a pure display-unit switch.
+  assert.equal(saved.profile.fitness.heightCm, 180);
+  assert.equal(saved.profile.fitness.currentWeightKg, 80);
+});
+
+test('smoke: onboarding goal picker supports search, a custom user-defined goal, and primary/secondary mutual exclusivity', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'obstart');
+  fireClick(sandbox, 'obnext'); // about you (all blank) -> gender/experience
+  fireClick(sandbox, 'obnext'); // -> goals
+  assert.ok(sheetHTML(sandbox).includes('Your goals'));
+
+  fireClick(sandbox, 'obgoalprimary', { id: 'strength' });
+  fireClick(sandbox, 'obgoalsecondary', { id: 'endurance' });
+  let saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.equal(saved.profile.fitness.primaryGoal, 'strength');
+  assert.deepEqual(saved.profile.fitness.secondaryGoals, ['endurance']);
+
+  // Choosing "endurance" as primary must pull it back out of secondary - never both at once.
+  fireClick(sandbox, 'obgoalprimary', { id: 'endurance' });
+  saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.equal(saved.profile.fitness.primaryGoal, 'endurance');
+  assert.deepEqual(saved.profile.fitness.secondaryGoals, []);
+
+  // obgoalprimary/obgoalsecondary/obaddgoal only replace their own list container's innerHTML
+  // (so the search box above them never loses focus while filtering) - env.js's fake DOM does
+  // not nest elements inside #sheet-root's own innerHTML string, so these targeted updates are
+  // read back from the list containers directly, not from sheetHTML()'s stale full-sheet string.
+  const goalLists = () => sandbox.document.querySelector('#ob-goal-primary-list').innerHTML + sandbox.document.querySelector('#ob-goal-secondary-list').innerHTML;
+  fireInput(sandbox, 'ob-goal-q', 'fat');
+  let lists = goalLists();
+  assert.ok(lists.includes('Fat loss'));
+  assert.ok(!lists.includes('Muscle gain'), 'the filtered list must hide non-matching goals');
+
+  fireInput(sandbox, 'ob-goal-q', '');
+  setVal(sandbox, 'ob-goal-custom', 'Climb a mountain');
+  fireClick(sandbox, 'obaddgoal');
+  saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.ok(saved.profile.fitness.customGoals.some((g) => g.label === 'Climb a mountain'));
+  lists = goalLists();
+  assert.ok(lists.includes('Climb a mountain'), 'the custom goal must appear immediately as a selectable chip');
+});
+
+test('smoke: onboarding equipment/muscle pickers are searchable multi-select, and support adding custom equipment', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'obstart');
+  for (let i = 0; i < 5; i++) fireClick(sandbox, 'obnext'); // about-you..schedule, all blank -> equipment & split
+  assert.ok(sheetHTML(sandbox).includes('Where do you train?'));
+
+  fireInput(sandbox, 'ob-equip-q', 'dumb');
+  let list = sandbox.document.querySelector('#ob-equip-list').innerHTML;
+  assert.ok(list.includes('Dumbbells'));
+  assert.ok(!list.includes('Barbell'), 'the filtered equipment list must hide non-matching items');
+  fireClick(sandbox, 'obequip', { id: 'dumbbells' });
+  let saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.deepEqual(saved.profile.fitness.workoutPrefs.equipment, ['dumbbells']);
+
+  fireInput(sandbox, 'ob-equip-q', '');
+  setVal(sandbox, 'ob-equip-custom', 'Sandbag');
+  fireClick(sandbox, 'obaddequip');
+  saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  const wp = saved.profile.fitness.workoutPrefs;
+  assert.ok(wp.customEquipment.some((e) => e.label === 'Sandbag'));
+  assert.ok(wp.equipment.indexOf(wp.customEquipment[0].id) >= 0, 'a newly added custom item is auto-selected');
+
+  fireClick(sandbox, 'obnext'); // -> focus & preferences
+  assert.ok(sheetHTML(sandbox).includes('Muscle groups to prioritise'));
+  fireInput(sandbox, 'ob-muscle-q', 'chest');
+  list = sandbox.document.querySelector('#ob-muscle-list').innerHTML;
+  assert.ok(list.includes('Chest'));
+  assert.ok(!list.includes('Hamstrings'), 'the filtered muscle list must hide non-matching groups');
+  fireClick(sandbox, 'obmuscle', { id: 'chest' });
+  saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.deepEqual(saved.profile.fitness.workoutPrefs.priorityMuscles, ['chest']);
+
+  setVal(sandbox, 'ob-tag-pref', 'Barbell squat');
+  fireClick(sandbox, 'obaddtag', { kind: 'pref' });
+  setVal(sandbox, 'ob-tag-avoid', 'Overhead press');
+  fireClick(sandbox, 'obaddtag', { kind: 'avoid' });
+  saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.deepEqual(saved.profile.fitness.workoutPrefs.preferredExercises, ['Barbell squat']);
+  assert.deepEqual(saved.profile.fitness.workoutPrefs.avoidExercises, ['Overhead press']);
+});
+
+test('smoke: a complete walk through every onboarding step finishes, marks the profile onboarded, and is then editable from Settings', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'obstart'); // step 1
+  setVal(sandbox, 'ob-h-cm', '175');
+  fireClick(sandbox, 'obnext'); // 2
+  fireClick(sandbox, 'obexperience', { id: 'intermediate' });
+  fireClick(sandbox, 'obnext'); // 3
+  fireClick(sandbox, 'obgoalprimary', { id: 'muscle_gain' });
+  fireClick(sandbox, 'obnext'); // 4
+  fireClick(sandbox, 'obactivity', { id: 'moderate' });
+  fireClick(sandbox, 'obfreq', { n: '3' });
+  fireClick(sandbox, 'obnext'); // 5
+  fireClick(sandbox, 'obdays', { n: '4' });
+  fireClick(sandbox, 'obschedtype', { v: 'fixed' });
+  fireClick(sandbox, 'obweekday', { wd: '1' });
+  fireClick(sandbox, 'obduration', { n: '60' });
+  fireClick(sandbox, 'obnext'); // 6
+  fireClick(sandbox, 'obaccess', { v: 'gym' });
+  fireClick(sandbox, 'obsplit', { id: 'ppl' });
+  fireClick(sandbox, 'obnext'); // 7
+  setVal(sandbox, 'ob-limitations', 'Bad left knee');
+  fireClick(sandbox, 'obnext'); // 8 - review
+  let html = sheetHTML(sandbox);
+  assert.ok(html.includes('Review'));
+  assert.ok(html.includes('Muscle gain'));
+  assert.ok(html.includes('Push / Pull / Legs'));
+
+  fireClick(sandbox, 'obfinish');
+  const saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  const fp = saved.profile.fitness;
+  assert.equal(fp.onboarded, true);
+  assert.equal(fp.heightCm, 175);
+  assert.equal(fp.experience, 'intermediate');
+  assert.equal(fp.primaryGoal, 'muscle_gain');
+  assert.equal(fp.activityLevel, 'moderate');
+  assert.equal(fp.currentTrainingFrequency, 3);
+  assert.equal(fp.workoutPrefs.daysPerWeek, 4);
+  assert.deepEqual(fp.workoutPrefs.availableDays, [1]);
+  assert.equal(fp.workoutPrefs.sessionDuration, 60);
+  assert.equal(fp.workoutPrefs.equipmentAccess, 'gym');
+  assert.equal(fp.workoutPrefs.preferredSplit, 'ppl');
+  assert.equal(fp.workoutPrefs.limitations, 'Bad left knee');
+  assert.equal(sheetHTML(sandbox), '', 'the onboarding sheet must close itself once finished');
+
+  // Re-opening from Settings must start at step 1 (no welcome screen) and offer "Save & close".
+  fireClick(sandbox, 'settings');
+  assert.ok(sheetHTML(sandbox).includes('Profile set up'));
+  fireClick(sandbox, 'obedit');
+  html = sheetHTML(sandbox);
+  assert.ok(html.includes('Step 1 of 8'));
+  assert.equal(attrValue(html, 'ob-h-cm'), '175', 'the editor must pre-fill already-answered fields');
+});
+
+test('smoke: a pre-Phase-3A install (no fitness key at all) migrates to full fitness-profile defaults without touching existing workout/nutrition data', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  const seeded = {
+    schema: 3,
+    profile: { targets: { kcal: 2200, protein: 170, steps: 10000, water: 2500 }, weights: { '2026-01-01': 71 }, customFoods: [] },
+    days: {
+      '2026-01-01': {
+        date: '2026-01-01', food: [{ id: 'e1', foodId: 'egg', qty: 2 }], steps: 5000, stepsSource: 'manual', water: 500,
+        sessions: [{ id: 's1', day: 'push', label: null, startedAt: 1000, finishedAt: 5000, status: 'finished', pausedAt: null, pausedMs: 0, lastAppliedSeq: 0, log: { 'incline-db': [{ w: 20, r: 8 }] }, rest: null }],
+        quarantine: { sets: [], food: [] },
+      },
+    },
+  };
+  sandbox.localStorage.setItem('vshape-tracker-v1', JSON.stringify(seeded));
+  assert.doesNotThrow(() => boot(sandbox));
+
+  const saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.ok(saved.profile.fitness, 'expected a fitness profile to be backfilled');
+  assert.equal(saved.profile.fitness.onboarded, false);
+  assert.equal(saved.profile.fitness.dob, null, 'never a fabricated value');
+  assert.deepEqual(saved.profile.fitness.workoutPrefs.equipment, []);
+  // Pre-existing data must be completely untouched by the migration.
+  assert.equal(saved.profile.weights['2026-01-01'], 71);
+  assert.equal(saved.profile.targets.kcal, 2200);
+  assert.equal(saved.days['2026-01-01'].food.length, 1);
+  assert.equal(saved.days['2026-01-01'].sessions[0].log['incline-db'][0].w, 20);
+
+  const sheet = sheetHTML(sandbox);
+  assert.ok(sheet.includes('Your fitness profile'), 'onboarding must offer to run for an upgraded install that never had a fitness profile');
+});
+
+test('smoke: onboarding progress and answers survive an app restart (resumes at the saved step, not from scratch)', () => {
+  const sandbox1 = createSandbox(KNOWN_IDS);
+  boot(sandbox1);
+  fireClick(sandbox1, 'obstart');
+  setVal(sandbox1, 'ob-h-cm', '170');
+  fireClick(sandbox1, 'obnext'); // -> step 2
+  fireClick(sandbox1, 'obgender', { id: 'female' });
+  const raw = sandbox1.localStorage.getItem('vshape-tracker-v1');
+  const saved1 = JSON.parse(raw);
+  assert.equal(saved1.profile.fitness.onboardingStep, 2);
+  assert.equal(saved1.profile.fitness.onboarded, false);
+
+  // A brand-new sandbox simulates a real app restart: fresh JS context, same persisted storage.
+  const sandbox2 = createSandbox(KNOWN_IDS);
+  sandbox2.localStorage.setItem('vshape-tracker-v1', raw);
+  boot(sandbox2);
+  const html = sheetHTML(sandbox2);
+  assert.ok(html.includes('Step 2 of 8'), 'must resume at the step it was left on, not restart from the welcome screen');
+  const saved2 = JSON.parse(sandbox2.localStorage.getItem('vshape-tracker-v1'));
+  assert.equal(saved2.profile.fitness.heightCm, 170, 'an already-answered field must not be lost across the restart');
+  assert.equal(saved2.profile.fitness.gender, 'female');
+});
+
+test('smoke: a backup export includes the fitness profile alongside the rest of the data', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'obstart');
+  setVal(sandbox, 'ob-h-cm', '190');
+  fireClick(sandbox, 'obnext');
+
+  let capturedBlobText = null;
+  sandbox.Blob = function Blob(parts) { capturedBlobText = parts[0]; };
+  fireClick(sandbox, 'exportdata');
+  assert.ok(capturedBlobText, 'expected exportdata to build a backup blob');
+  const backup = JSON.parse(capturedBlobText);
+  assert.equal(backup.app, 'vshape-tracker');
+  assert.equal(backup.profile.fitness.heightCm, 190, 'the exported backup must include the fitness profile, not just targets/weights');
+});
+
+// The restore path itself (VShapeCore.migrateBlob + the profile.fitness merge app.js runs
+// right after it) is exercised directly here, the same way a real restore reconstructs
+// S.profile from a parsed backup file - env.js's fake DOM elements do not implement
+// addEventListener, so the real #backupIn file-picker change handler cannot be driven from
+// a test and is intentionally not exercised here (true of every file-input flow in this
+// harness, not just this one).
+test('smoke: restoring a backup rebuilds a full fitness profile (migrateBlob + the same merge loadLocal runs) without fabricating any value', () => {
+  const VShapeCore = require('../core.js');
+  const backupProfile = { targets: { kcal: 2200, protein: 170, steps: 10000, water: 2500 }, weights: {}, customFoods: [], fitness: { onboarded: true, dob: '1990-01-01', heightCm: 190 } };
+  const out = VShapeCore.migrateBlob({ schema: VShapeCore.SCHEMA_VERSION, profile: backupProfile, days: {} });
+  const fitness = VShapeCore.mergeFitnessProfile(out.profile.fitness);
+  assert.equal(fitness.onboarded, true);
+  assert.equal(fitness.heightCm, 190);
+  assert.equal(fitness.dob, '1990-01-01');
+  assert.equal(fitness.currentWeightKg, null, 'a field the backup never answered must stay null, never a fabricated value');
+  assert.deepEqual(fitness.workoutPrefs, VShapeCore.defaultWorkoutPrefs(), 'a backup predating workoutPrefs still gets the full default shape');
+});
+
+/* ---------- workout generator wizard (Phase 3B) ---------- */
+// Settings always renders straight from the live S.plans/S.activePlanId (app.js is one big
+// IIFE, so S itself is not reachable from a test - see every other plan-builder test in this
+// file), so re-opening it is used here as a side-effect-free way to read plan count/activeness
+// without needing a prior saveLocal() to have run.
+function planRows(sandbox) {
+  fireClick(sandbox, 'settings');
+  const html = sheetHTML(sandbox);
+  return Array.from(html.matchAll(/data-act="planactivate" data-id="([^"]+)">(&#9679;|&#9675;)/g))
+    .map((m) => ({ id: m[1], active: m[2] === '&#9679;' }));
+}
+test('smoke: the generate wizard produces a preview and saving it adds a new, inactive plan without touching the existing active one', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  const before = planRows(sandbox);
+  const activeBefore = before.find((r) => r.active).id;
+
+  fireClick(sandbox, 'genstart');
+  let html = sheetHTML(sandbox);
+  assert.ok(html.includes('Generate a workout plan'), 'expected the generate wizard to open');
+
+  fireClick(sandbox, 'gendays', { n: '3' });
+  fireClick(sandbox, 'genequip', { id: 'barbell' });
+  fireClick(sandbox, 'genequip', { id: 'dumbbells' });
+  fireClick(sandbox, 'gengenerate');
+  html = sheetHTML(sandbox);
+  assert.ok(html.includes('Plan preview'), 'expected generating to open a preview sheet');
+  assert.ok(html.includes('With 2-3 days a week'), 'expected a plain-language explanation of the chosen split');
+
+  fireClick(sandbox, 'gensave');
+  const after = planRows(sandbox);
+  assert.equal(after.length, before.length + 1, 'expected exactly one new plan to be added');
+  assert.ok(after.find((r) => r.id === activeBefore && r.active), 'saving a generated plan must never auto-activate it or touch the previously active plan');
+  const newRow = after.find((r) => !before.some((b) => b.id === r.id));
+  assert.ok(newRow && !newRow.active, 'the newly generated plan must be saved inactive');
+
+  const saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  const newPlan = saved.plans.find((p) => p.id === newRow.id);
+  assert.ok(newPlan.templates.length > 0, 'expected the saved plan to carry real templates');
+  assert.ok(newPlan.templates[0].ex.length > 0, 'expected the saved plan templates to carry real exercises');
+});
+
+test('smoke: regenerating replaces only the in-memory preview and never writes a plan until explicitly saved', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  const countBefore = planRows(sandbox).length;
+
+  fireClick(sandbox, 'genstart');
+  fireClick(sandbox, 'gendays', { n: '4' });
+  fireClick(sandbox, 'gengenerate');
+  assert.ok(sheetHTML(sandbox).includes('Plan preview'));
+
+  fireClick(sandbox, 'genregenerate');
+  assert.ok(sheetHTML(sandbox).includes('Plan preview'), 'expected regenerate to redraw another preview');
+
+  fireClick(sandbox, 'closesheet');
+  assert.equal(planRows(sandbox).length, countBefore, 'discarding (never tapping Save) must never create a plan');
+});
+
+test('smoke: choosing a fully custom split explains itself instead of generating or crashing', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'genstart');
+  fireClick(sandbox, 'gensplit', { id: 'custom' });
+  assert.doesNotThrow(() => fireClick(sandbox, 'gengenerate'));
+  assert.ok(sheetHTML(sandbox).includes('Generate a workout plan'), 'expected to stay on the wizard, not crash into a broken preview');
+  assert.ok(sandbox.document.querySelector('#toast').textContent.toLowerCase().includes('own split'), 'expected a toast explaining why nothing was generated');
+});
+
+test('smoke: a backup round-trip preserves the generated exercise library (custom exercises and favorite/avoid flags)', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'libopen');
+  fireClick(sandbox, 'libfav', { id: 'bb-bench-press' });
+
+  let capturedBlobText = null;
+  sandbox.Blob = function Blob(parts) { capturedBlobText = parts[0]; };
+  fireClick(sandbox, 'exportdata');
+  const backup = JSON.parse(capturedBlobText);
+  assert.deepEqual(backup.library.flags['bb-bench-press'], { favorite: true, avoid: false });
+
+  const VShapeCore = require('../core.js');
+  const out = VShapeCore.migrateBlob({ schema: VShapeCore.SCHEMA_VERSION, profile: backup.profile, days: backup.days, plans: backup.plans, activePlanId: backup.activePlanId, library: backup.library });
+  const restoredLibrary = VShapeCore.mergeLibrary(out.library);
+  assert.deepEqual(VShapeCore.libraryFlags(restoredLibrary, 'bb-bench-press'), { favorite: true, avoid: false });
+});
+
+/* ---------- backup restore ordering/safety (regressions) ---------- */
+const CUSTOM_PLAN = { id: 'p-custom', name: 'Backup custom plan', flexible: true, schedule: { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] }, templates: [{ id: 't-fb', name: 'Full body', tag: '', cue: '', ex: [] }] };
+function minimalBackup(extra) {
+  return Object.assign({ app: 'vshape-tracker', v: 3, schema: 3, profile: { targets: { kcal: 2350, protein: 160, steps: 20000, water: 3000 }, weights: {}, customFoods: [] }, days: {}, photos: {}, plans: [CUSTOM_PLAN], activePlanId: 'p-custom' }, extra);
+}
+test('smoke: restoring keeps a safety copy of what was on the device before it was replaced', async () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'stepadd', { n: '1000' }); // make the pre-restore state distinctive
+  const liveBefore = sandbox.localStorage.getItem('vshape-tracker-v1');
+  pickBackupFile(sandbox, minimalBackup());
+  await tick();
+  fireClick(sandbox, 'doimport');
+  await tick(80);
+  const copies = await readSafetyCopies(sandbox);
+  assert.ok(copies.some((c) => c.raw === liveBefore), 'expected the pre-restore data to be kept as a safety copy');
+});
+test('smoke: a backup from a newer schema is refused up front and changes nothing (including photos)', async () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'stepadd', { n: '1000' });
+  const liveBefore = sandbox.localStorage.getItem('vshape-tracker-v1');
+  const photo = { date: '2026-01-01', img: 'data:image/jpeg;base64,/9j/4AAQSkZJRg==' };
+  pickBackupFile(sandbox, minimalBackup({ v: 99, schema: 99, photos: { '2026-01-01': photo } }));
+  await tick();
+  fireClick(sandbox, 'doimport');
+  await tick(80);
+  assert.equal(sandbox.localStorage.getItem('vshape-tracker-v1'), liveBefore, 'live data must be untouched');
+  assert.ok(sandbox.document.querySelector('#toast').textContent.includes('newer app version'));
+  // The old code wrote the backup's photos into IndexedDB (and deleted the existing ones) before
+  // it noticed the backup was unusable, so a refused restore still changed the photo store.
+  assert.equal((await readPhotoStore(sandbox)).length, 0, 'a refused restore must not have written any photos');
+  assert.equal((await readSafetyCopies(sandbox)).length, 0, 'a refused restore must not have done any of the restore work');
+});
+test('smoke: restoring a well-formed backup still keeps its custom workout plans (plans/activePlanId survive the file-picker handler)', async () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox); // fresh install: only the seeded default plan exists
+  pickBackupFile(sandbox, minimalBackup());
+  await tick();
+  assert.ok(sheetHTML(sandbox).includes('Restore backup') || sheetHTML(sandbox).toLowerCase().includes('restore'), 'expected the restore confirmation sheet to open');
+  fireClick(sandbox, 'doimport');
+  await tick(80);
+  const saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.equal(saved.plans.length, 1, "the restored data must contain the backup's plans, not a reseeded default");
+  assert.equal(saved.plans[0].name, 'Backup custom plan');
+  assert.equal(saved.activePlanId, 'p-custom');
+});
+
+/* ---------- gym counter follows the active plan (regression: was hardcoded "/ 5") ---------- */
+function seedPlanOnly(sandbox, plan) {
+  sandbox.localStorage.setItem('vshape-tracker-v1', JSON.stringify({
+    schema: 3, profile: { targets: { kcal: 2350, protein: 160, steps: 20000, water: 3000 }, weights: {}, customFoods: [] },
+    days: {}, plans: [plan], activePlanId: plan.id,
+  }));
+}
+test('smoke: the Today gym counter uses the active plan\'s training days, not a hardcoded 5', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  const plan = JSON.parse(JSON.stringify(CUSTOM_PLAN));
+  plan.flexible = false;
+  plan.schedule = { 0: [], 1: ['t-fb'], 2: [], 3: ['t-fb'], 4: [], 5: ['t-fb'], 6: [] };
+  seedPlanOnly(sandbox, plan);
+  boot(sandbox);
+  const html = sandbox.document.querySelector('#app').innerHTML;
+  assert.ok(html.includes('0 / 3'), 'a 3-day plan must show a 3-session weekly target');
+  assert.ok(!html.includes('0 / 5'));
+});
+test('smoke: a flexible plan shows the gym count without a made-up weekly target', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  seedPlanOnly(sandbox, JSON.parse(JSON.stringify(CUSTOM_PLAN))); // flexible: true
+  boot(sandbox);
+  const html = sandbox.document.querySelector('#app').innerHTML;
+  assert.ok(html.includes('Gym, 7 days'));
+  assert.ok(!/\b0 \/ \d/.test(html), 'no denominator for a plan with no fixed schedule');
+});
+test('smoke: the default seeded plan still reads "/ 5"', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  assert.ok(sandbox.document.querySelector('#app').innerHTML.includes('0 / 5'));
+});
+
+/* ---------- backup reminder ---------- */
+function isoDaysAgo(n) { const d = new Date(); d.setDate(d.getDate() - n); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function seedDaysAndProfile(sandbox, days, profileExtra) {
+  const out = {};
+  Object.keys(days).forEach((date) => { out[date] = Object.assign({ date, food: [], steps: 0, stepsSource: null, water: 0, sessions: [], quarantine: { sets: [], food: [] }, override: null }, days[date]); });
+  sandbox.localStorage.setItem('vshape-tracker-v1', JSON.stringify({
+    schema: 3, profile: Object.assign({ targets: { kcal: 2350, protein: 160, steps: 20000, water: 3000 }, weights: {}, customFoods: [] }, profileExtra || {}), days: out,
+  }));
+}
+const appHTML = (sandbox) => sandbox.document.querySelector('#app').innerHTML;
+
+test('smoke: a week of logged data and no backup shows a back-up banner on Today', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  seedDaysAndProfile(sandbox, { [isoDaysAgo(10)]: { steps: 5000 } });
+  boot(sandbox);
+  assert.ok(appHTML(sandbox).includes('Back up your data'), 'expected the reminder');
+});
+test('smoke: no back-up banner for a brand new install, or for data less than a week old', () => {
+  const fresh = createSandbox(KNOWN_IDS); boot(fresh);
+  assert.ok(!appHTML(fresh).includes('Back up your data'));
+  const young = createSandbox(KNOWN_IDS);
+  seedDaysAndProfile(young, { [isoDaysAgo(2)]: { steps: 5000 } });
+  boot(young);
+  assert.ok(!appHTML(young).includes('Back up your data'));
+});
+test('smoke: "Later" snoozes the back-up banner and the snooze is saved', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  seedDaysAndProfile(sandbox, { [isoDaysAgo(10)]: { steps: 5000 } });
+  boot(sandbox);
+  fireClick(sandbox, 'backuplater');
+  assert.ok(!appHTML(sandbox).includes('Back up your data'));
+  const saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.ok(saved.profile.backupSnoozedUntil > Date.now(), 'the snooze must be persisted');
+});
+test('smoke: exporting a backup records the time, stamps it inside the file, and clears the banner', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  seedDaysAndProfile(sandbox, { [isoDaysAgo(10)]: { steps: 5000 } });
+  boot(sandbox);
+  let blob = null;
+  sandbox.URL.createObjectURL = (b) => { blob = b; return 'blob:fake'; };
+  const before = Date.now();
+  fireClick(sandbox, 'exportdata');
+  const saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.ok(saved.profile.lastBackupAt >= before, 'lastBackupAt must be recorded');
+  const file = JSON.parse(blob.parts[0]);
+  assert.equal(file.profile.lastBackupAt, saved.profile.lastBackupAt, 'the file itself carries its own timestamp, so a restore knows how fresh it is');
+  assert.ok(!appHTML(sandbox).includes('Back up your data'));
+});
+test('smoke: Settings shows when the last backup was made', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  seedDaysAndProfile(sandbox, { [isoDaysAgo(10)]: { steps: 5000 } });
+  boot(sandbox);
+  fireClick(sandbox, 'settings');
+  assert.ok(sheetHTML(sandbox).includes('Never backed up'));
+  sandbox.URL.createObjectURL = (b) => 'blob:fake';
+  fireClick(sandbox, 'exportdata');
+  fireClick(sandbox, 'settings');
+  assert.ok(sheetHTML(sandbox).includes('Last backup: today'), 'got: ' + (sheetHTML(sandbox).match(/Last backup[^<]*|Never backed up[^<]*/) || ['(nothing)'])[0]);
+});
+
+/* ---------- exercise alternatives (Phase 3C) ---------- */
+test('smoke: a generated exercise offers a "find alternative" action that substitutes the movement without touching sets/reps/rest', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'genstart');
+  fireClick(sandbox, 'gendays', { n: '3' });
+  fireClick(sandbox, 'genequip', { id: 'barbell' });
+  fireClick(sandbox, 'gengenerate');
+  fireClick(sandbox, 'genedit');
+  let html = sheetHTML(sandbox);
+  assert.ok(html.includes('Edit plan'), 'expected "Edit before saving" to save the draft and open the plan editor');
+  const templateId = html.match(/data-act="templatesel" data-id="([^"]+)"/)[1];
+  const planId = html.match(/data-act="templateadd" data-planid="([^"]+)"/)[1];
+
+  fireClick(sandbox, 'templatesel', { id: templateId });
+  html = sheetHTML(sandbox);
+  const altMatch = html.match(/data-act="exalt" data-id="([^"]+)"/);
+  assert.ok(altMatch, 'expected at least one generated exercise to expose a "find alternative" action');
+  const exId = altMatch[1];
+  const beforeRow = html.match(new RegExp('<b>([^<]+)</b><div class="muted small">[^<]*&middot; (\\d+) x (\\d+)&ndash;(\\d+)[^<]*&middot; rest (\\d+)s[\\s\\S]{0,120}data-act="exalt" data-id="' + exId + '"'));
+
+  fireClick(sandbox, 'exalt', { id: exId });
+  html = sheetHTML(sandbox);
+  assert.ok(html.includes('Find an alternative'), 'expected the alternatives sheet to open');
+  const pickMatch = html.match(/data-act="exaltpick" data-id="([^"]+)"/);
+  assert.ok(pickMatch, 'expected at least one ranked alternative to be offered');
+
+  fireClick(sandbox, 'exaltpick', { id: pickMatch[1] });
+  html = sheetHTML(sandbox);
+  assert.ok(html.includes('Edit workout'), 'expected substituting to return to the workout template editor');
+
+  const saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  const plan = saved.plans.find((p) => p.id === planId);
+  const tpl = plan.templates.find((t) => t.id === templateId);
+  const substituted = tpl.ex.find((e) => e.id === exId);
+  assert.ok(substituted, 'expected the exercise id to be preserved across the substitution');
+  if (beforeRow) {
+    assert.equal(substituted.sets, Number(beforeRow[2]), 'substituting an alternative must preserve the prescribed sets');
+    assert.equal(substituted.rest, Number(beforeRow[5]), 'substituting an alternative must preserve the prescribed rest');
+  }
+});
+
+test('smoke: hand-built exercises (no library id) never show a "find alternative" action', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'settings');
+  fireClick(sandbox, 'plannew');
+  let html = sheetHTML(sandbox);
+  const planId = html.match(/data-act="templateadd" data-planid="([^"]+)"/)[1];
+  fireClick(sandbox, 'templateadd', { planid: planId });
+  fireClick(sandbox, 'exadd');
+  fireClick(sandbox, 'exnewcustom');
+  setVal(sandbox, 'ex-name', 'Hand Built Curl');
+  setVal(sandbox, 'ex-muscle', 'Biceps');
+  setVal(sandbox, 'ex-sets', '3');
+  setVal(sandbox, 'ex-rest', '60');
+  setVal(sandbox, 'ex-lo', '8');
+  setVal(sandbox, 'ex-hi', '12');
+  setVal(sandbox, 'ex-start', '10');
+  setVal(sandbox, 'ex-inc', '1');
+  fireClick(sandbox, 'exsave');
+  html = sheetHTML(sandbox);
+  assert.ok(html.includes('Hand Built Curl'));
+  assert.ok(!html.includes('data-act="exalt"'), 'a hand-built exercise has no library id, so there is nothing to find an alternative from');
+});
+
+/* ---------- Agent 2 integration: nutrition engine + theming ---------- */
+function exportedBackup(sandbox) {
+  let capturedBlobText = null;
+  sandbox.Blob = function Blob(parts) { capturedBlobText = parts[0]; };
+  fireClick(sandbox, 'exportdata');
+  return JSON.parse(capturedBlobText);
+}
+test('smoke: a fresh install migrates nutrition/appearance state on boot, and a second boot is idempotent', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  assert.doesNotThrow(() => boot(sandbox));
+  const backup = exportedBackup(sandbox);
+  assert.equal(backup.profile.nutritionAdvanced.version, 1);
+  assert.deepEqual(backup.profile.nutritionAdvanced.logs, []);
+  assert.ok(backup.profile.appearance && backup.profile.appearance.mode, 'expected normalized appearance defaults');
+
+  // A fresh install never writes to localStorage until something actually saves; force one
+  // harmless save so there is a real persisted blob to re-load for the idempotency check below.
+  fireClick(sandbox, 'stepadd', { n: '1000' });
+
+  // Re-loading the exact same saved blob must not throw and must not duplicate/alter anything.
+  const sandbox2 = createSandbox(KNOWN_IDS);
+  sandbox2.localStorage.setItem('vshape-tracker-v1', sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.doesNotThrow(() => boot(sandbox2));
+  const backup2 = exportedBackup(sandbox2);
+  assert.deepEqual(backup2.profile.nutritionAdvanced, backup.profile.nutritionAdvanced);
+});
+test('smoke: the one-time legacy migration imports existing custom foods and daily targets into the nutrition engine', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  const legacy = {
+    profile: { targets: { kcal: 2400, protein: 180, steps: 20000, water: 3000 }, weights: {}, customFoods: [{ id: 'c-1', name: 'My Shake', unit: 'scoop', per: 1, def: 1, k: 150, p: 30, c: 5, f: 2 }] },
+    days: {}
+  };
+  sandbox.localStorage.setItem('vshape-tracker-v1', JSON.stringify({ schema: 3, profile: legacy.profile, days: legacy.days }));
+  assert.doesNotThrow(() => boot(sandbox));
+  const backup = exportedBackup(sandbox);
+  assert.ok(backup.profile.nutritionAdvanced.foods.some((f) => f.name === 'My Shake'), 'expected the legacy custom food to be imported into the nutrition engine foods list');
+  assert.equal(backup.profile.nutritionAdvanced.targets.daily.k, 2400);
+  assert.equal(backup.profile.nutritionAdvanced.targets.daily.p, 180);
+});
+test('smoke: a backup round-trip preserves nutritionAdvanced and appearance exactly', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  const original = exportedBackup(sandbox);
+
+  const sandbox2 = createSandbox(KNOWN_IDS);
+  boot(sandbox2);
+  const VShapeCore = require('../core.js');
+  const out = VShapeCore.migrateBlob({ schema: VShapeCore.SCHEMA_VERSION, profile: original.profile, days: original.days, plans: original.plans, activePlanId: original.activePlanId, library: original.library });
+  const VShapeNutrition = require('../nutrition-advanced.js');
+  const VShapeThemes = require('../theme-manager.js');
+  const restoredNutrition = VShapeNutrition.migrate(out.profile.nutritionAdvanced);
+  const restoredAppearance = VShapeThemes.normalize(out.profile.appearance);
+  assert.deepEqual(restoredNutrition, original.profile.nutritionAdvanced);
+  assert.deepEqual(restoredAppearance, original.profile.appearance);
+});
+test('smoke: a corrupt nutritionAdvanced blob is never discarded or replaced with empty defaults on boot', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  const garbage = { version: 1, foods: 'not-an-array' };
+  sandbox.localStorage.setItem('vshape-tracker-v1', JSON.stringify({ schema: 3, profile: { targets: { kcal: 2350, protein: 160, steps: 20000, water: 3000 }, weights: {}, customFoods: [], nutritionAdvanced: garbage }, days: {} }));
+  assert.doesNotThrow(() => boot(sandbox));
+  fireClick(sandbox, 'tab', { tab: 'food' });
+  const html = sandbox.document.querySelector('#food-root').innerHTML;
+  assert.ok(html.includes('needs attention'), 'expected a recovery message instead of a crash or silently-wiped data');
+  const backup = exportedBackup(sandbox);
+  assert.deepEqual(backup.profile.nutritionAdvanced, garbage, 'the raw corrupt blob must be preserved untouched, never replaced with fresh defaults');
+});
+test('smoke: switching into and out of the Food tab mounts/unmounts the nutrition UI without throwing or touching plans/sessions', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  const before = planRows(sandbox);
+  assert.doesNotThrow(() => fireClick(sandbox, 'tab', { tab: 'food' }));
+  assert.ok(sandbox.document.querySelector('#app').innerHTML.includes('food-root'));
+  assert.doesNotThrow(() => fireClick(sandbox, 'tab', { tab: 'train' }));
+  assert.doesNotThrow(() => fireClick(sandbox, 'tab', { tab: 'food' }));
+  assert.doesNotThrow(() => fireClick(sandbox, 'tab', { tab: 'today' }));
+  assert.deepEqual(planRows(sandbox), before);
+});
+test('smoke: the legacy dashboard totals() never produces NaN from a nutrition log with an explicit null nutrient', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  const today = new Date().toISOString().slice(0, 10);
+  const days = {};
+  days[today] = { date: today, food: [{ id: 'x1', meal: 'Lunch', name: 'Mystery bar', qty: 1, unit: 'each', k: null, p: 10, c: null, f: 2 }], steps: 0, stepsSource: null, water: 0, sessions: [], quarantine: { sets: [], food: [] }, override: null };
+  sandbox.localStorage.setItem('vshape-tracker-v1', JSON.stringify({ schema: 3, profile: { targets: { kcal: 2350, protein: 160, steps: 20000, water: 3000 }, weights: {}, customFoods: [] }, days: days }));
+  assert.doesNotThrow(() => boot(sandbox));
+  const html = sandbox.document.querySelector('#app').innerHTML;
+  assert.ok(!/NaN/.test(html), 'a null nutrient must never surface as NaN on the Today dashboard');
+});
+test('smoke: the lifetime theme watcher applies a resolved appearance attribute to <html> on boot', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  assert.ok(['default', 'dark', 'light'].includes(sandbox.document.documentElement.dataset.vshapeTheme), 'expected the theme watcher to set data-vshape-theme on boot');
+});
+
+/* ---------- plate calculator (Phase 3D) ---------- */
+test('smoke: a weighted exercise shows a plate calculator trigger that opens a working calculator with a graphic and a result', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  seedActiveSession(sandbox);
+  boot(sandbox);
+  fireClick(sandbox, 'tab', { tab: 'train' });
+  let html = sandbox.document.querySelector('#app').innerHTML;
+  assert.ok(html.includes('data-act="platecalc" data-ex="incline-db"'), 'expected a plate calculator trigger next to a weighted exercise');
+
+  fireClick(sandbox, 'platecalc', { ex: 'incline-db' });
+  html = sheetHTML(sandbox);
+  assert.ok(html.includes('Plate calculator'));
+  assert.ok(html.includes('<svg'), 'expected a graphical barbell diagram for the default barbell equipment type');
+  assert.ok(html.includes('Total:'), 'expected a computed result');
+});
+test('smoke: applying a plate calculation writes a draft weight for the next pending set without creating or touching a logged set', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  seedActiveSession(sandbox);
+  boot(sandbox);
+  fireClick(sandbox, 'tab', { tab: 'train' });
+  fireClick(sandbox, 'platecalc', { ex: 'incline-db' });
+  fireClick(sandbox, 'pcequip', { id: 'dumbbell' });
+  fireClick(sandbox, 'pcapply');
+
+  const html = sandbox.document.querySelector('#app').innerHTML;
+  const draftVal = attrValue(html, 'w-incline-db0');
+  assert.ok(draftVal && Number(draftVal) > 0, 'expected the next pending set\'s weight input to show the applied draft value');
+
+  const saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  const session = saved.days['2026-01-01'].sessions[0];
+  assert.deepEqual(session.log, {}, 'applying a plate calculation must only stage a draft, never create a logged set');
+});
+test('smoke: bodyweight and assisted exercises never show the plate calculator trigger', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  seedActiveSession(sandbox, { exSnapshot: [{ id: 'pullup', name: 'Pull-up', sets: 2, lo: 4, hi: 10, rest: 120, inc: 2.5, start: 0, muscle: 'Back', bw: true, assisted: true }] });
+  boot(sandbox);
+  fireClick(sandbox, 'tab', { tab: 'train' });
+  const html = sandbox.document.querySelector('#app').innerHTML;
+  assert.ok(!html.includes('data-act="platecalc"'), 'a bodyweight/assisted exercise has no plate math to offer');
+});
+test('smoke: plate-inventory and bar settings persist across a reload', () => {
+  const sandbox = createSandbox(KNOWN_IDS);
+  boot(sandbox);
+  fireClick(sandbox, 'platesettingsopen');
+  setVal(sandbox, 'pcs-plate-w', '25');
+  setVal(sandbox, 'pcs-plate-n', '4');
+  fireClick(sandbox, 'pcaddplate');
+  setVal(sandbox, 'pcs-barweight', '15');
+  setVal(sandbox, 'pcs-collar', '5');
+  fireClick(sandbox, 'pcsavebar');
+
+  const saved = JSON.parse(sandbox.localStorage.getItem('vshape-tracker-v1'));
+  assert.ok(saved.profile.plateCalc.plates.some((p) => p.weight === 25 && p.count === 4));
+  assert.equal(saved.profile.plateCalc.bar.weight, 15);
+  assert.equal(saved.profile.plateCalc.bar.collarWeight, 5);
+
+  const sandbox2 = createSandbox(KNOWN_IDS);
+  sandbox2.localStorage.setItem('vshape-tracker-v1', JSON.stringify(saved));
+  boot(sandbox2);
+  fireClick(sandbox2, 'platesettingsopen');
+  const html = sheetHTML(sandbox2);
+  assert.ok(html.includes('25 kg') && html.includes('&times; 4'));
+  assert.ok(attrValue(html, 'pcs-barweight') === '15' || html.includes('value="15"'));
 });

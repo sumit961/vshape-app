@@ -236,6 +236,16 @@ nav button[aria-current="page"]{background:var(--accent-grad);color:#fff;box-sha
 .tile b{font-family:var(--font-display);font-size:21px;font-variant-numeric:tabular-nums}
 .tile span{font-size:11px;color:var(--muted)}
 .chip.on{background:var(--water);color:#fff;border-color:transparent}
+.chip.sel{background:var(--accent-grad);color:#fff;border-color:transparent;box-shadow:0 6px 16px rgba(214,76,4,.28)}
+.chipwrap{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.obbar{height:6px;background:rgba(36,28,23,.08);border-radius:999px;overflow:hidden;margin-top:4px}
+.obbar>i{display:block;height:100%;background:var(--accent-grad);border-radius:999px}
+.obcard{display:block;width:100%;text-align:left;background:rgba(255,255,255,.75);border:1px solid rgba(36,28,23,.10);border-radius:16px;padding:12px 14px;margin-top:8px}
+.obcard b{display:block;font-family:var(--font-display);font-weight:600}
+.obcard.sel{background:var(--accent-soft);border-color:rgba(242,106,15,.4)}
+.taglist{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.tag{display:inline-flex;align-items:center;gap:6px;background:var(--accent-soft);color:var(--accent-text);border-radius:999px;padding:6px 6px 6px 14px;font-size:14px}
+.tag button{background:none;border:0;color:inherit;font-size:16px;line-height:1;min-width:24px;min-height:24px;border-radius:50%}
 .listrow{display:flex;gap:6px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
 .listrow:first-of-type{border-top:0}
 .planname{background:none;border:0;text-align:left;padding:0;color:inherit;min-width:0;font:inherit}

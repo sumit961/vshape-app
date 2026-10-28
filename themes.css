@@ -1,0 +1,125 @@
+/* Load after style.css. Attributes are set only by theme-manager.js. */
+:root[data-vshape-theme="dark"] {
+  color-scheme: dark;
+  --bg: #10151c;
+  --ink: #f4f6fa;
+  --muted: #b4c0d0;
+  --line: #425064;
+  --glass: #1b2533;
+  --glass-strong: #202d3d;
+  --glass-edge: #425064;
+  --surface: #1b2533;
+  --surface2: #263447;
+  --steps: #cfd9e6;
+  --water: #65b6ff;
+  --good: #68dda3;
+  --warn: #ff9c94;
+  --protein: #ffc773;
+  --shadow: 0 10px 34px #0004;
+}
+:root[data-vshape-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f7fa;
+  --ink: #17202d;
+  --muted: #526175;
+  --line: #ccd4df;
+  --glass: #ffffff;
+  --glass-strong: #ffffff;
+  --glass-edge: #ccd4df;
+  --surface: #ffffff;
+  --surface2: #ebeff5;
+  --steps: #334155;
+  --water: #1764a6;
+  --good: #11673a;
+  --warn: #ad211b;
+  --protein: #95510a;
+  --shadow: 0 10px 34px #15203315;
+}
+:root[data-vshape-theme="default"] {
+  color-scheme: light;
+}
+html[data-vshape-theme] body {
+  background: var(--bg);
+  color: var(--ink);
+}
+html[data-vshape-theme] :is(input, select, textarea) {
+  color: var(--ink);
+  background: var(--surface);
+  border-color: var(--line);
+}
+html[data-vshape-theme] :is(.sheet, .tile, .pill, .btn.ghost) {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--line);
+}
+html[data-vshape-theme] :is(.card, nav) {
+  box-shadow: var(--shadow);
+  border-color: var(--glass-edge);
+}
+html[data-vshape-theme]
+  :is(
+    .pill[aria-pressed="true"],
+    nav button[aria-current="page"],
+    .chip.sel,
+    .streak
+  ) {
+  background: var(--accent-grad);
+  color: var(--accent-ink);
+}
+html[data-vshape-theme] :is(.pill[aria-pressed="true"], .chip.sel) {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
+}
+html[data-vshape-theme] #timer.go {
+  background: var(--accent-grad);
+  color: var(--accent-ink);
+}
+html[data-vshape-theme] #timer.go .icon {
+  color: var(--accent-ink);
+}
+html[data-vshape-theme] .btn {
+  color: var(--accent-ink);
+}
+html[data-vshape-theme] .btn.ghost {
+  color: var(--accent-text);
+}
+html[data-vshape-theme] .chart :is(.tl, .vl) {
+  stroke: var(--bg);
+}
+html[data-vshape-theme] .chart .dot {
+  fill: var(--surface);
+}
+[data-vshape-density="compact"] :is(.card, .tile) {
+  padding: 10px;
+  margin-top: 8px;
+}
+[data-vshape-density="compact"] .ent {
+  padding-block: 5px;
+}
+.vshape-theme-settings {
+  display: grid;
+  gap: 14px;
+}
+.vshape-theme-settings label {
+  display: grid;
+  gap: 5px;
+}
+.vshape-theme-settings :is(button, select, input) {
+  min-height: 44px;
+}
+[data-vshape-motion="reduced"] *,
+[data-vshape-motion="reduced"] *::before,
+[data-vshape-motion="reduced"] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-vshape-theme] *,
+  html[data-vshape-theme] *::before,
+  html[data-vshape-theme] *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

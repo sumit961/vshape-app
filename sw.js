@@ -1,7 +1,8 @@
 /* V-Shape Tracker service worker: app shell works offline, fonts are cached after first load. */
-const VERSION = 'vshape-v4';
+const VERSION = 'vshape-v5';
 const FONTS = 'vshape-fonts-v1';
 const SHELL = ['./', 'index.html', 'style.css', 'core.js', 'app.js', 'manifest.webmanifest',
+  'nutrition-advanced.js', 'nutrition-ui.js', 'nutrition.css', 'theme-manager.js', 'themes.css',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png', 'icons/favicon.png'];
 
 self.addEventListener('install', e => {

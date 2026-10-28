@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>VShape nutrition and appearance module preview</title>
+    <link rel="stylesheet" href="../style.css" />
+    <link rel="stylesheet" href="../themes.css" />
+    <link rel="stylesheet" href="../nutrition.css" />
+  </head>
+  <body>
+    <main style="max-width: 800px; margin: auto; padding: 20px">
+      <h1>VShape module preview</h1>
+      <p>
+        Isolated Agent 2 preview. This page uses its own storage and does not
+        connect to your app data. Start by creating a custom food from a label.
+      </p>
+      <p id="error" role="alert"></p>
+      <details>
+        <summary>Appearance</summary>
+        <div id="appearance"></div>
+      </details>
+      <div id="nutrition"></div>
+    </main>
+    <script src="../nutrition-advanced.js"></script>
+    <script src="../nutrition-ui.js"></script>
+    <script src="../theme-manager.js"></script>
+    <script>
+      (async function () {
+        const key = "vshape-agent2-preview-v1",
+          themeKey = key + "-theme";
+        try {
+          const state = VShapeNutrition.migrate(
+            JSON.parse(localStorage.getItem(key) || "null"),
+          );
+          VShapeNutritionUI.mount(document.getElementById("nutrition"), {
+            state,
+            onChange: async (next) =>
+              localStorage.setItem(key, JSON.stringify(next)),
+            makeId: () => crypto.randomUUID(),
+          });
+          VShapeThemes.mount(document.getElementById("appearance"), {
+            preferences: await VShapeThemes.load(async () =>
+              JSON.parse(localStorage.getItem(themeKey) || "null"),
+            ),
+            onSave: async (p) =>
+              localStorage.setItem(themeKey, JSON.stringify(p)),
+          });
+        } catch (e) {
+          document.getElementById("error").textContent =
+            "Preview could not start: " + e.message;
+        }
+      })();
+    </script>
+  </body>
+</html>

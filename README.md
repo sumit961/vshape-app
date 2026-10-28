@@ -47,6 +47,14 @@ analytics. A plan still on the previous (pre-weekday-schedule) shape is upgraded
 automatically and idempotently on load, keeping every template's id equal to its old day id so
 existing sessions are never orphaned from it.
 
+`profile` also carries `lastBackupAt` (stamped into the exported file itself, so a restore knows how
+fresh it is) and `backupSnoozedUntil` for the backup reminder.
+
+**Restore** replaces everything on the device with the backup's profile, days, photos **and
+workout plans** (a plan-less, older backup gets the seeded default). Before anything is replaced the
+current data is kept as a safety copy in IndexedDB (Settings > Recover saved copies), and a backup
+from a newer schema is refused before any photo is touched.
+
 On first load of old (pre-session, or pre-plan) data: each day's existing log becomes one
 `finished` session with no invented start time; the previous raw blob is kept under a
 `vshape-tracker-v1-pre-migration-backup-<timestamp>` key (and, best-effort, in IndexedDB)
@@ -83,7 +91,9 @@ real browser test tool (e.g. Playwright) against `npm run serve`.
 
 - **Today:** greeting and streak, 7-day goal strip, calorie/protein/steps rings,
   carbs and fat, steps entry or sync, activity tiles, water tracker, today's workout, weigh-in.
-- **Food:** meal templates, food library, custom foods, copy yesterday.
+- **Food:** advanced nutrition tracking (`VShapeNutritionUI`) — saved/recent/favourite/custom
+  search, editable foods and recipes, manual calorie/macro entries without saving a food,
+  fractional logging, undo/repeat, yesterday/meal copying and manual barcode lookup.
 - **Train:** load and rep suggestions from your history, explicit Start/Pause/Resume/Finish
   workout controls, a durable deadline-based rest timer, PR badge when you beat your
   previous best set. The default is a 5-day split, but it's a fully custom plan under
@@ -100,6 +110,10 @@ real browser test tool (e.g. Playwright) against `npm run serve`.
   quick-logging controller: current exercise, set number, suggested vs. actual weight/reps
   with quick +/- weight adjustment, Log Set, rest countdown with Pause/Resume/Skip, and
   Finish once every set is done — see "Smart workout notification" in `ANDROID.md`.
+- **Backup reminder:** all data lives on the device, so Today shows a "Back up your data" card
+  once you have a week of data and either no backup yet or one older than 14 days ("Later"
+  snoozes it for 3 days). Settings shows when you last backed up. The decision is
+  `VShapeCore.backupReminder`.
 - Scrollbars are hidden throughout.
 
 ## Steps from Android (Health Connect)

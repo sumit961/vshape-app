@@ -1,0 +1,88 @@
+.vshape-nutrition {
+  color: var(--ink, #241c17);
+  line-height: 1.5;
+  max-width: 760px;
+  margin: auto;
+}
+.vshape-nutrition :is(section, article, fieldset) {
+  background: var(--surface, #fff);
+  border: 1px solid var(--line, #ccc);
+  border-radius: 16px;
+  padding: 14px;
+  margin-block: 12px;
+  min-width: 0;
+}
+.vshape-nutrition header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.vshape-nutrition :is(form, [data-ingredients]) {
+  display: grid;
+  gap: 10px;
+}
+.vshape-nutrition label {
+  display: grid;
+  gap: 4px;
+  font-weight: 600;
+}
+.vshape-nutrition label:has(input[type="checkbox"]) {
+  display: flex;
+  align-items: center;
+}
+.vshape-nutrition :is(button, input, select) {
+  font: inherit;
+  min-height: 44px;
+  border: 1px solid var(--line, #aaa);
+  border-radius: 10px;
+  padding: 8px;
+  max-width: 100%;
+  color: var(--ink, #241c17);
+  background: var(--surface, #fff);
+}
+.vshape-nutrition button {
+  cursor: pointer;
+  font-weight: 600;
+}
+.vshape-nutrition button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.vshape-nutrition [aria-pressed="true"] {
+  border: 2px solid var(--accent-text, #8a3100);
+  background: var(--accent-soft, #fce4d3);
+}
+.vshape-nutrition :is(button, input, select, summary):focus-visible {
+  outline: 3px solid var(--accent-text, #8a3100);
+  outline-offset: 3px;
+}
+.vshape-nutrition [role="alert"] {
+  border: 2px solid var(--warn, #a92317);
+  padding: 10px;
+}
+.vshape-nutrition [data-status] {
+  position: sticky;
+  top: 0;
+  background: var(--surface, #fff);
+  z-index: 1;
+}
+.vshape-nutrition a {
+  color: var(--accent-text, #8a3100);
+  text-decoration: underline;
+}
+.vshape-nutrition summary {
+  min-height: 44px;
+  cursor: pointer;
+}
+.vshape-nutrition h4 {
+  overflow-wrap: anywhere;
+}
+@media (min-width: 600px) {
+  .vshape-nutrition form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .vshape-nutrition form :is(p, h4, [data-ingredients]) {
+    grid-column: 1/-1;
+  }
+}
